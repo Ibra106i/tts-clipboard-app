@@ -1,0 +1,27 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the app",
+  "windows": ["main", "overlay"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-close",
+    "clipboard-manager:allow-read-text",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister-all",
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-ask",
+    "fs:default",
+    "fs:allow-read",
+    "fs:allow-write",
+    "fs:allow-exists",
+    "fs:allow-mkdir",
+    "fs:allow-copy-file",
+    "fs:allow-remove",
+    "fs:allow-read-dir"
+  ]
+}
