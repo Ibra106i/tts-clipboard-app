@@ -53,10 +53,10 @@ pub fn init_voice() -> windows::core::Result<ISpVoice> {
         // Try to prefer a OneCore voice over the default SAPI voice
         match try_select_onecore_voice(&voice) {
             Ok(()) => {
-                eprintln!("[tts] Using OneCore voice");
+                log::info!("[tts] Using OneCore voice");
             }
             Err(e) => {
-                eprintln!("[tts] OneCore voice unavailable, using default: {e}");
+                log::error!("[tts] OneCore voice unavailable, using default: {e}");
             }
         }
 
@@ -76,7 +76,7 @@ fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
         let enumerator = category.EnumTokens(None, None)?;
 
         let mut token: Option<ISpObjectToken> = None;
-        enumerator.Next(1, &mut token, Some(std::ptr::null_mut()))?;
+        enumerator.Next(1, &mut token, None)?;
 
         let token = token.ok_or_else(|| windows::core::Error::from_win32())?;
         voice.SetVoice(&token)?;
