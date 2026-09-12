@@ -73,7 +73,7 @@ pub fn run() {
                 use tauri::WebviewUrl;
                 use tauri::WebviewWindowBuilder;
 
-                WebviewWindowBuilder::new(
+                match WebviewWindowBuilder::new(
                     app.handle(),
                     OVERLAY_LABEL,
                     WebviewUrl::App(overlay_url.into()),
@@ -87,14 +87,19 @@ pub fn run() {
                 .always_on_top(true)
                 .transparent(true)
                 .visible(false)
-                .build()?;
+                .build() {
+                    Ok(_) => {}
+                    Err(e) => {
+                        log::error!("Failed to create overlay window: {e}");
+                    }
+                }
             }
 
             // Register global hotkey
             {
                 let handle = app.handle().clone();
                 let shortcut = app.global_shortcut();
-                shortcut.on_shortcut("Ctrl+Shift+Space", move |_app, _shortcut, event| {
+                if let Err(e) = shortcut.on_shortcut("Ctrl+Shift+Space", move |_app, _shortcut, event| {
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         let h = handle.clone();
                         tauri::async_runtime::spawn(async move {
@@ -103,25 +108,45 @@ pub fn run() {
                             }
                         });
                     }
-                })?;
+                }) {
+                    log::error!("Failed to register global shortcut: {e}");
+                }
             }
 
             // System tray
             {
                 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 
-                let show_item = MenuItemBuilder::with_id("show", "Show").build(app)?;
-                let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
-                let menu = MenuBuilder::new(app)
+                let show_item = match MenuItemBuilder::with_id("show", "Show").build(app) {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Failed to create show menu item: {e}");
+                        return Ok(());
+                    }
+                };
+                let quit_item = match MenuItemBuilder::with_id("quit", "Quit").build(app) {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Failed to create quit menu item: {e}");
+                        return Ok(());
+                    }
+                };
+                let menu = match MenuBuilder::new(app)
                     .item(&show_item)
                     .item(&quit_item)
-                    .build()?;
+                    .build() {
+                    Ok(m) => m,
+                    Err(e) => {
+                        log::error!("Failed to create tray menu: {e}");
+                        return Ok(());
+                    }
+                };
 
                 let handle = app.handle().clone();
                 let tray = app.tray_by_id("main-tray");
                 if let Some(tray) = tray {
-                    tray.set_menu(Some(menu))?;
-                    tray.set_tooltip(Some("TTS Library"))?;
+                    let _ = tray.set_menu(Some(menu));
+                    let _ = tray.set_tooltip(Some("TTS Library"));
                     tray.on_menu_event(move |_app, event| {
                         match event.id().as_ref() {
                             "show" => {
