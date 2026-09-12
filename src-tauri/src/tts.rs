@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Emitter, State};
 use windows::Win32::Media::Speech::*;
 use windows::Win32::System::Com::*;
 
@@ -174,7 +174,34 @@ pub fn speak_book_chapter(
     chapter_index: usize,
     total_chapters: usize,
     state: State<'_, TtsState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Check previous mode and emit interruption event if something was playing
+    let previous_mode = {
+        let mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        mode.clone()
+    };
+
+    if previous_mode != TtsMode::Idle {
+        let mut payload = serde_json::Map::new();
+        match &previous_mode {
+            TtsMode::Idle => {}
+            TtsMode::PlayingClipboard => {
+                payload.insert("previous_mode".to_string(), serde_json::Value::String("clipboard".to_string()));
+            }
+            TtsMode::PlayingBook {
+                book_id,
+                chapter_index,
+                ..
+            } => {
+                payload.insert("previous_mode".to_string(), serde_json::Value::String("book".to_string()));
+                payload.insert("book_id".to_string(), serde_json::Value::String(book_id.clone()));
+                payload.insert("chapter_index".to_string(), serde_json::Value::Number((*chapter_index).into()));
+            }
+        }
+        let _ = app.emit("tts-interrupted", serde_json::Value::Object(payload));
+    }
+
     // Stop any current playback
     {
         let voice_guard = state.inner().voice.lock().map_err(|e| e.to_string())?;
