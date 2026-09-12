@@ -11,6 +11,8 @@ pub struct Book {
     pub current_chapter: usize,
     pub current_position: usize,
     pub total_chapters: usize,
+    #[serde(default)]
+    pub chapters: Option<Vec<Chapter>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

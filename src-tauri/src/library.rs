@@ -85,6 +85,7 @@ pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> Result<B
         current_chapter: 0,
         current_position: 0,
         total_chapters: chapters.len(),
+        chapters: Some(chapters),
     };
 
     let mut books = read_library(app_handle)?;
@@ -119,22 +120,34 @@ pub fn get_book_chapters(
     book_id: &str,
     app_handle: &tauri::AppHandle,
 ) -> Result<Vec<Chapter>, String> {
-    let books = read_library(app_handle)?;
+    let mut books = read_library(app_handle)?;
     let book = books
-        .iter()
+        .iter_mut()
         .find(|b| b.id == book_id)
         .ok_or_else(|| format!("Book not found: {book_id}"))?;
+
+    if let Some(ref chapters) = book.chapters {
+        if !chapters.is_empty() {
+            return Ok(chapters.clone());
+        }
+    }
 
     let path = PathBuf::from(&book.file_path);
     if !path.exists() {
         return Err("Book file not found on disk. It may have been moved or deleted.".to_string());
     }
 
-    match book.file_type.as_str() {
+    let chapters = match book.file_type.as_str() {
         "pdf" => parser::extract_pdf_text(path.to_str().unwrap_or_default()),
         "epub" => parser::extract_epub_text(path.to_str().unwrap_or_default()),
         _ => Err("Unsupported file type".to_string()),
-    }
+    }?;
+
+    book.chapters = Some(chapters.clone());
+    book.total_chapters = chapters.len();
+    write_library(app_handle, &books)?;
+
+    Ok(chapters)
 }
 
 pub fn save_reading_position(
