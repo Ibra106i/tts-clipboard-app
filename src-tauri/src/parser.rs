@@ -35,16 +35,23 @@ fn extract_text_runs(doc: &Document, page_id: lopdf::ObjectId) -> Option<Vec<Tex
     };
 
     let mut runs = Vec::new();
+    let mut in_text = false;
 
     for operation in &content.operations {
         match operation.operator.as_str() {
+            "BT" => {
+                in_text = true;
+            }
+            "ET" => {
+                in_text = false;
+            }
             "Tf" => {
-                if operation.operands.len() >= 2 {
+                if in_text && operation.operands.len() >= 2 {
                     state.font_size = operand_as_f32(&operation.operands[1]).unwrap_or(state.font_size);
                 }
             }
             "Td" | "TD" => {
-                if operation.operands.len() >= 2 {
+                if in_text && operation.operands.len() >= 2 {
                     let tx = operand_as_f32(&operation.operands[0]).unwrap_or(0.0);
                     let ty = operand_as_f32(&operation.operands[1]).unwrap_or(0.0);
                     state.x += tx;
@@ -52,40 +59,61 @@ fn extract_text_runs(doc: &Document, page_id: lopdf::ObjectId) -> Option<Vec<Tex
                 }
             }
             "Tm" => {
-                if operation.operands.len() >= 6 {
+                if in_text && operation.operands.len() >= 6 {
                     state.x = operand_as_f32(&operation.operands[4]).unwrap_or(state.x);
                     state.y = operand_as_f32(&operation.operands[5]).unwrap_or(state.y);
                 }
             }
             "T*" => {
-                state.y -= state.font_size * 1.2;
+                if in_text {
+                    state.y -= state.font_size * 1.2;
+                }
             }
             "Tj" => {
-                if let Some(text) = extract_string_operand(&operation.operands) {
-                    let normalized_y = 1.0 - (state.y / state.page_height).clamp(0.0, 1.0);
-                    runs.push(TextRun {
-                        text,
-                        font_size: state.font_size,
-                        y_position: normalized_y,
-                    });
-                    state.x += state.font_size * runs.last().map(|r| r.text.len() as f32 * 0.5).unwrap_or(0.0);
+                if in_text {
+                    if let Some(text) = extract_string_operand(&operation.operands) {
+                        let normalized_y = (state.y / state.page_height).clamp(0.0, 1.0);
+                        runs.push(TextRun {
+                            text,
+                            font_size: state.font_size,
+                            y_position: normalized_y,
+                        });
+                        state.x += state.font_size * runs.last().map(|r| r.text.len() as f32 * 0.5).unwrap_or(0.0);
+                    }
                 }
             }
             "TJ" => {
-                if let Some(text) = extract_tj_text(&operation.operands) {
-                    let normalized_y = 1.0 - (state.y / state.page_height).clamp(0.0, 1.0);
-                    runs.push(TextRun {
-                        text,
-                        font_size: state.font_size,
-                        y_position: normalized_y,
-                    });
-                    state.x += state.font_size * runs.last().map(|r| r.text.len() as f32 * 0.5).unwrap_or(0.0);
+                if in_text {
+                    if let Some(text) = extract_tj_text(&operation.operands) {
+                        let normalized_y = (state.y / state.page_height).clamp(0.0, 1.0);
+                        runs.push(TextRun {
+                            text,
+                            font_size: state.font_size,
+                            y_position: normalized_y,
+                        });
+                        state.x += state.font_size * runs.last().map(|r| r.text.len() as f32 * 0.5).unwrap_or(0.0);
+                    }
                 }
             }
-            "'" | "\"" => {
-                if operation.operands.len() >= 1 {
+            "'" => {
+                if in_text {
+                    state.y -= state.font_size * 1.2;
                     if let Some(text) = extract_string_operand(&operation.operands) {
-                        let normalized_y = 1.0 - (state.y / state.page_height).clamp(0.0, 1.0);
+                        let normalized_y = (state.y / state.page_height).clamp(0.0, 1.0);
+                        runs.push(TextRun {
+                            text,
+                            font_size: state.font_size,
+                            y_position: normalized_y,
+                        });
+                        state.x += state.font_size * runs.last().map(|r| r.text.len() as f32 * 0.5).unwrap_or(0.0);
+                    }
+                }
+            }
+            "\"" => {
+                if in_text && operation.operands.len() >= 3 {
+                    state.y -= state.font_size * 1.2;
+                    if let Some(text) = extract_string_operand_index(&operation.operands, 2) {
+                        let normalized_y = (state.y / state.page_height).clamp(0.0, 1.0);
                         runs.push(TextRun {
                             text,
                             font_size: state.font_size,
@@ -107,8 +135,9 @@ fn get_page_height(doc: &Document, page_id: lopdf::ObjectId) -> Option<f32> {
     let mediabox = page.get(b"MediaBox").ok()?;
     if let Object::Array(arr) = mediabox {
         if arr.len() >= 4 {
-            let height = operand_as_f32(&arr[3]).unwrap_or(842.0);
-            return Some(height);
+            let y0 = operand_as_f32(&arr[1]).unwrap_or(0.0);
+            let y1 = operand_as_f32(&arr[3]).unwrap_or(842.0);
+            return Some(y1 - y0);
         }
     }
     Some(842.0)
@@ -128,6 +157,14 @@ fn extract_string_operand(operands: &[Object]) -> Option<String> {
         Object::Name(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
         _ => None,
     }
+}
+
+fn extract_string_operand_index(operands: &[Object], index: usize) -> Option<String> {
+    operands.get(index).and_then(|op| match op {
+        Object::String(bytes, _) => Some(String::from_utf8_lossy(bytes).to_string()),
+        Object::Name(bytes) => Some(String::from_utf8_lossy(bytes).to_string()),
+        _ => None,
+    })
 }
 
 fn extract_tj_text(operands: &[Object]) -> Option<String> {
