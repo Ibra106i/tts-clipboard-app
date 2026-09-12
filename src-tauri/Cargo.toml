@@ -28,6 +28,7 @@ tauri-plugin-fs = "2"
 arboard = "3"
 lopdf = "0.34"
 epub = "2"
+scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 windows = { version = "0.58", features = [

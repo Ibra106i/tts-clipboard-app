@@ -1,5 +1,6 @@
 use crate::models::Chapter;
 use lopdf::Document;
+use scraper::{Html, Selector};
 
 pub fn extract_pdf_text(file_path: &str) -> Result<Vec<Chapter>, String> {
     let doc = Document::load(file_path).map_err(|e| format!("Failed to load PDF: {e}"))?;
@@ -48,7 +49,7 @@ pub fn extract_epub_text(file_path: &str) -> Result<Vec<Chapter>, String> {
         };
 
         let html = String::from_utf8_lossy(&data).to_string();
-        let text = strip_html(&html);
+        let text = extract_epub_html_filtered(&html);
 
         let trimmed = text.trim().to_string();
         if !trimmed.is_empty() {
@@ -68,6 +69,141 @@ pub fn extract_epub_text(file_path: &str) -> Result<Vec<Chapter>, String> {
     Ok(chapters)
 }
 
+fn lower_class_split(class_attr: &str) -> Vec<String> {
+    class_attr
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+fn is_excluded_element(element: scraper::ElementRef) -> bool {
+    if let Some(epub_type) = element.value().attr("epub:type") {
+        let lower = epub_type.to_lowercase();
+        if lower.contains("footnote") || lower.contains("endnote") {
+            return true;
+        }
+    }
+
+    if element.value().name() == "aside" {
+        return true;
+    }
+
+    let target_classes = ["footnote", "endnote", "note"];
+    if let Some(class_attr) = element.value().attr("class") {
+        for token in lower_class_split(class_attr) {
+            if target_classes.contains(&token.as_str()) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn is_descendant_of_excluded(element: scraper::ElementRef) -> bool {
+    let mut current = element.parent();
+    while let Some(parent) = current {
+        if let Some(parent_elem) = scraper::ElementRef::wrap(parent) {
+            if is_excluded_element(parent_elem) {
+                return true;
+            }
+            current = parent_elem.parent();
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+fn extract_epub_html_filtered(html: &str) -> String {
+    let document = Html::parse_document(html);
+
+    let epub_type_selector = Selector::parse("[epub\\:type]").unwrap();
+    let has_epub_type_markers = document.select(&epub_type_selector).any(|elem| {
+        if let Some(epub_type) = elem.value().attr("epub:type") {
+            let lower = epub_type.to_lowercase();
+            lower.contains("footnote") || lower.contains("endnote")
+        } else {
+            false
+        }
+    });
+
+    let aside_selector = Selector::parse("aside").unwrap();
+    let has_aside = document.select(&aside_selector).next().is_some();
+
+    let mut has_class_markers = false;
+    let class_selector = Selector::parse("[class]").unwrap();
+    for elem in document.select(&class_selector) {
+        if is_excluded_element(elem) {
+            has_class_markers = true;
+            break;
+        }
+    }
+
+    if !has_epub_type_markers && !has_aside && !has_class_markers {
+        return strip_html(html);
+    }
+
+    let body_selector = Selector::parse("body").unwrap();
+    if let Some(body) = document.select(&body_selector).next() {
+        extract_text_filtered(body)
+    } else {
+        let root = document.root_element();
+        let mut result = String::new();
+        for child in root.children() {
+            if let Some(child_elem) = scraper::ElementRef::wrap(child) {
+                if child_elem.value().name() == "head" {
+                    continue;
+                }
+                let child_text = extract_text_filtered(child_elem);
+                result.push_str(&child_text);
+            }
+        }
+        result
+    }
+}
+
+fn extract_text_filtered(element: scraper::ElementRef) -> String {
+    let mut result = String::new();
+    let block_tags = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "br"];
+
+    for child in element.children() {
+        match child.value() {
+            scraper::Node::Text(text) => {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    result.push_str(trimmed);
+                    result.push(' ');
+                }
+            }
+            scraper::Node::Element(elem) => {
+                if let Some(child_elem) = scraper::ElementRef::wrap(child) {
+                    if is_excluded_element(child_elem) || is_descendant_of_excluded(child_elem) {
+                        continue;
+                    }
+
+                    let tag = elem.name().to_lowercase();
+                    let is_block = block_tags.contains(&tag.as_str());
+
+                    if is_block && !result.is_empty() && !result.ends_with("\n\n") {
+                        result.push_str("\n\n");
+                    }
+
+                    let child_text = extract_text_filtered(child_elem);
+                    result.push_str(&child_text);
+
+                    if is_block && !result.ends_with("\n\n") {
+                        result.push_str("\n\n");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
 fn strip_html(html: &str) -> String {
     let mut result = String::new();
     let mut skip_content = false;
@@ -83,7 +219,6 @@ fn strip_html(html: &str) -> String {
                 tag_name.push(next);
                 chars.next();
             }
-            // Skip to end of tag
             while let Some(&next) = chars.peek() {
                 if next == '>' {
                     chars.next();
@@ -110,7 +245,6 @@ fn strip_html(html: &str) -> String {
         result.push(ch);
     }
 
-    // Collapse multiple newlines
     let mut cleaned = String::new();
     let mut prev_was_newline = false;
     for ch in result.chars() {
