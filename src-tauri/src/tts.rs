@@ -49,7 +49,39 @@ pub fn init_voice() -> windows::core::Result<ISpVoice> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)?;
+
+        // Try to prefer a OneCore voice over the default SAPI voice
+        match try_select_onecore_voice(&voice) {
+            Ok(()) => {
+                eprintln!("[tts] Using OneCore voice");
+            }
+            Err(e) => {
+                eprintln!("[tts] OneCore voice unavailable, using default: {e}");
+            }
+        }
+
         Ok(voice)
+    }
+}
+
+fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
+    unsafe {
+        let category: ISpObjectTokenCategory =
+            CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
+
+        let onecore_path =
+            windows::core::HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices");
+        category.SetId(&onecore_path, false)?;
+
+        let enumerator = category.EnumTokens(None, None)?;
+
+        let mut token: Option<ISpObjectToken> = None;
+        enumerator.Next(1, &mut token, Some(std::ptr::null_mut()))?;
+
+        let token = token.ok_or_else(|| windows::core::Error::from_win32())?;
+        voice.SetVoice(&token)?;
+
+        Ok(())
     }
 }
 
