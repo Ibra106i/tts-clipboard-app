@@ -88,10 +88,19 @@ fn is_excluded_element(element: scraper::ElementRef) -> bool {
         return true;
     }
 
-    let target_classes = ["footnote", "endnote", "note"];
+    let exact_targets = ["fn"];
+    let substring_targets = ["footnote", "endnote", "note"];
+    let false_positives = ["noteworthy", "notebook", "notepad"];
+
     if let Some(class_attr) = element.value().attr("class") {
         for token in lower_class_split(class_attr) {
-            if target_classes.contains(&token.as_str()) {
+            if false_positives.contains(&token.as_str()) {
+                continue;
+            }
+            if exact_targets.contains(&token.as_str()) {
+                return true;
+            }
+            if substring_targets.iter().any(|t| token.contains(t)) {
                 return true;
             }
         }
