@@ -55,5 +55,8 @@ non_ascii_idents = "deny"
 [lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+# Every `unsafe` block must justify itself in a comment. SAPI needs unsafe, but
+# it must never need an unexplained one.
+undocumented_unsafe_blocks = "warn"
 manual_let_else = "warn"
 redundant_clone = "warn"

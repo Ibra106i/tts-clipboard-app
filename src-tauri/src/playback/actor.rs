@@ -76,6 +76,12 @@ pub struct PlaybackHandle {
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
+impl std::fmt::Debug for PlaybackHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlaybackHandle").finish_non_exhaustive()
+    }
+}
+
 impl PlaybackHandle {
     /// Spawn the playback thread, creating the engine inside it.
     ///
@@ -463,6 +469,7 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
+    use crate::playback::speaker::EngineProgress;
     use super::testing::FakeSpeaker;
     use super::*;
 
@@ -629,6 +636,96 @@ mod tests {
             speaker.spoken_texts().len(),
             spoken_after_start,
             "reading state must not queue more speech"
+        );
+        handle.shutdown();
+    }
+
+    /// An engine that cannot speak must not take the actor down with it.
+    struct ExplodingSpeaker;
+
+    impl Speaker for ExplodingSpeaker {
+        fn speak(&mut self, _text: &str) -> AppResult<()> {
+            Err(AppError::playback("the engine died"))
+        }
+
+        fn purge(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn pause(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn set_rate(&mut self, _sapi_rate: i32) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn progress(&mut self) -> AppResult<EngineProgress> {
+            Ok(EngineProgress {
+                running: false,
+                offset_chars: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn a_failing_engine_reports_the_error_and_leaves_the_actor_usable() {
+        let handle = PlaybackHandle::spawn(
+            Box::new(|| Ok(Box::new(ExplodingSpeaker) as Box<dyn Speaker>)),
+            Arc::new(NoEvents),
+        )
+        .expect("thread starts");
+
+        let error = handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                "hello",
+            ))
+            .expect_err("speaking must fail");
+        assert_eq!(error.code(), "playback_failed");
+
+        // The actor is still alive and has cleaned up after the failure.
+        assert!(handle.is_idle().expect("still responsive"));
+        handle.shutdown();
+    }
+
+    #[test]
+    fn an_engine_that_cannot_be_created_is_reported_at_startup() {
+        let error = PlaybackHandle::spawn(
+            Box::new(|| Err(AppError::playback("no voice installed"))),
+            Arc::new(NoEvents),
+        )
+        .expect_err("spawn must fail loudly");
+
+        assert_eq!(error.code(), "playback_failed");
+    }
+
+    #[test]
+    fn the_engine_is_created_inside_the_playback_thread() {
+        // The factory runs on the actor thread, which is what makes the COM
+        // apartment valid without any unsafe thread-ownership promise.
+        let spawned_on: Arc<Mutex<Option<thread::ThreadId>>> = Arc::new(Mutex::new(None));
+        let recorder = Arc::clone(&spawned_on);
+        let caller = thread::current().id();
+
+        let handle = PlaybackHandle::spawn(
+            Box::new(move || {
+                *recorder.lock().expect("lock") = Some(thread::current().id());
+                Ok(Box::new(FakeSpeaker::new()) as Box<dyn Speaker>)
+            }),
+            Arc::new(NoEvents),
+        )
+        .expect("thread starts");
+
+        let engine_thread = spawned_on.lock().expect("lock").expect("recorded");
+        assert_ne!(
+            engine_thread, caller,
+            "the engine must not be built on the caller thread"
         );
         handle.shutdown();
     }

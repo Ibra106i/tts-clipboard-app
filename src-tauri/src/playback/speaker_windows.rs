@@ -18,7 +18,16 @@ pub struct SapiSpeaker {
 impl SapiSpeaker {
     /// Create the voice. Must run on the thread that will own it: COM is
     /// initialised here and the apartment is never shared.
+    ///
+    /// Apartment contract: the caller is the playback thread, and this is the
+    /// first COM call it makes. `CoInitializeEx` therefore establishes the
+    /// apartment before any interface pointer exists on that thread, and every
+    /// later call in this file happens on the same thread. Nothing here is
+    /// marshalled across apartments, which is what the previous
+    /// `unsafe impl Send` silently assumed and never enforced.
     pub fn new() -> AppResult<Self> {
+        // SAFETY: first COM call on this thread; the process is single-threaded
+        // with respect to this apartment and never uninitialises it.
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL).map_err(|e| {
@@ -37,6 +46,8 @@ impl SapiSpeaker {
 }
 
 fn select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
+    // SAFETY: `voice` is a live interface pointer created on this thread, and
+    // the token objects are created and released within this scope.
     unsafe {
         let category: ISpObjectTokenCategory =
             CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
@@ -59,6 +70,8 @@ fn select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
 impl Speaker for SapiSpeaker {
     fn speak(&mut self, text: &str) -> AppResult<()> {
         let htext = windows::core::HSTRING::from(text);
+        // SAFETY: the pointer is owned by this struct, is used only from the
+        // thread that created it, and the HSTRING outlives the call.
         unsafe {
             self.voice
                 .Speak(&htext, SPF_ASYNC.0 as u32, Some(std::ptr::null_mut()))
@@ -69,6 +82,7 @@ impl Speaker for SapiSpeaker {
     /// An empty string with no flags tells SAPI to stop immediately and drop
     /// anything queued.
     fn purge(&mut self) -> AppResult<()> {
+        // SAFETY: same-thread use of an owned interface pointer.
         unsafe {
             self.voice
                 .Speak(
@@ -81,6 +95,7 @@ impl Speaker for SapiSpeaker {
     }
 
     fn pause(&mut self) -> AppResult<()> {
+        // SAFETY: same-thread use of an owned interface pointer.
         unsafe {
             self.voice
                 .Pause()
@@ -89,6 +104,7 @@ impl Speaker for SapiSpeaker {
     }
 
     fn resume(&mut self) -> AppResult<()> {
+        // SAFETY: same-thread use of an owned interface pointer.
         unsafe {
             self.voice
                 .Resume()
@@ -97,6 +113,7 @@ impl Speaker for SapiSpeaker {
     }
 
     fn set_rate(&mut self, sapi_rate: i32) -> AppResult<()> {
+        // SAFETY: same-thread use of an owned interface pointer.
         unsafe {
             self.voice
                 .SetRate(sapi_rate)
@@ -105,6 +122,8 @@ impl Speaker for SapiSpeaker {
     }
 
     fn progress(&mut self) -> AppResult<EngineProgress> {
+        // SAFETY: same-thread use of an owned interface pointer; the out
+        // parameters are stack locals that outlive the call.
         unsafe {
             let mut status = SPVOICESTATUS::default();
             let mut bookmark = windows::core::PWSTR::null();
