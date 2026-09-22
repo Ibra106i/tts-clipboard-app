@@ -126,6 +126,12 @@ impl AppError {
         }
     }
 
+    /// True when the failure is "something else is already playing". Callers
+    /// that want to react to that specifically should not string-match the code.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy)
+    }
+
     #[cfg(not(windows))]
     pub fn unsupported_platform(feature: impl Into<String>) -> Self {
         Self::UnsupportedPlatform {

@@ -2,15 +2,8 @@ mod error;
 mod library;
 mod models;
 mod parser;
+mod playback;
 mod text;
-
-// The playback module is the only Windows-specific part of the crate. On other
-// platforms a stub with the same surface reports `unsupported_platform`.
-#[cfg(windows)]
-mod tts;
-#[cfg(not(windows))]
-#[path = "tts_stub.rs"]
-mod tts;
 
 use crate::error::{AppError, AppResult};
 use std::path::PathBuf;
@@ -25,14 +18,11 @@ const MAX_CLIPBOARD_LEN: usize = 5000;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tts::init_com();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(tts::TtsState::new())
         .setup(|app| {
             // Logging is always on, in debug and release. A release build with
             // no logs turned every recoverable failure into an unexplained
@@ -70,13 +60,18 @@ pub fn run() {
                 Err(e) => log::warn!("log directory unavailable: {e}"),
             }
 
-            // Initialize the speech voice. All locking happens inside the
-            // playback module, so this never touches its internals and never
-            // panics on a poisoned mutex.
+            // Start the playback thread. It creates the speech engine inside
+            // itself (COM objects must not cross threads) and owns the playback
+            // state machine for the lifetime of the process.
             {
-                let state = app.handle().state::<tts::TtsState>();
-                if let Err(error) = tts::init_voice(&state) {
-                    log::error!("Speech voice unavailable: {error}");
+                let events = std::sync::Arc::new(PlaybackEventsSink {
+                    app: app.handle().clone(),
+                });
+                match playback::PlaybackHandle::spawn(playback::speaker_factory(), events) {
+                    Ok(handle) => {
+                        app.manage(handle);
+                    }
+                    Err(error) => log::error!("Playback is unavailable: {error}"),
                 }
             }
 
@@ -208,6 +203,11 @@ pub fn run() {
                         }
                         "quit" => {
                             log::info!("shutting down");
+                            // Stop the speech engine and join the playback
+                            // thread before the process goes away.
+                            if let Some(playback) = handle.try_state::<playback::PlaybackHandle>() {
+                                playback.shutdown();
+                            }
                             handle.exit(0);
                         }
                         _ => {}
@@ -233,12 +233,13 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            tts::speak_text,
-            tts::speak_book_chapter,
-            tts::pause_resume_tts,
-            tts::set_tts_rate,
-            tts::get_speech_position,
-            tts::stop_tts,
+            playback::commands::speak_text,
+            playback::commands::speak_book_chapter,
+            playback::commands::pause_resume_tts,
+            playback::commands::set_tts_rate,
+            playback::commands::get_speech_position,
+            playback::commands::playback_get_state,
+            playback::commands::stop_tts,
             cmd_open_file_dialog,
             cmd_import_book,
             cmd_get_library,
@@ -254,14 +255,14 @@ pub fn run() {
 async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
     // Check if TTS is busy
     {
-        let state = app.state::<tts::TtsState>();
-        if !tts::is_idle(&state)? {
+        let handle = app.state::<playback::PlaybackHandle>();
+        if !handle.is_idle()? {
             let _ = app.emit("tts-busy", ());
             return Ok(());
         }
     }
 
-    let text = tts::read_clipboard()?;
+    let text = playback::read_clipboard()?;
 
     if text.trim().is_empty() {
         log::info!("hotkey pressed with an empty clipboard");
@@ -301,10 +302,67 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
         let _ = window.set_focus();
     }
 
-    let state = app.state::<tts::TtsState>();
-    tts::speak_text(display_text, state)?;
+    let handle = app.state::<playback::PlaybackHandle>();
+    match handle.start(playback::PlaybackJob::new(
+        playback::PlaybackSource::Clipboard,
+        "Clipboard",
+        &display_text,
+    )) {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_busy() => {
+            let _ = app.emit("tts-busy", ());
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
 
-    Ok(())
+/// Bridges actor events to the webview.
+///
+/// The actor emits through this instead of holding an `AppHandle`, which keeps
+/// the playback thread independent of Tauri and makes it testable.
+struct PlaybackEventsSink {
+    app: tauri::AppHandle,
+}
+
+impl playback::PlaybackEvents for PlaybackEventsSink {
+    fn snapshot(&self, snapshot: &playback::PlaybackSnapshot) {
+        // Fired on every state change and a few times a second while speaking.
+        // This is what replaced the 100 ms polling loop in the frontend.
+        let _ = self.app.emit("playback-state", snapshot);
+        let _ = self.app.emit(
+            "playback-progress",
+            serde_json::json!({
+                "spoken_chars": snapshot.spoken_chars,
+                "total_chars": snapshot.total_chars,
+            }),
+        );
+    }
+
+    fn interrupted(&self, previous: &playback::PlaybackSource, chapter_index: Option<usize>) {
+        let _ = self.app.emit(
+            "tts-interrupted",
+            serde_json::json!({
+                "previous_source": match previous {
+                    playback::PlaybackSource::Clipboard => "clipboard".to_string(),
+                    playback::PlaybackSource::Book { book_id, .. } => format!("book:{book_id}"),
+                },
+                "previous_chapter_index": chapter_index,
+            }),
+        );
+    }
+
+    fn chapter_finished(&self, book_id: &str, chapter_index: usize, total_chapters: usize) {
+        // Replaces the window CustomEvent that used to carry this as a string.
+        let _ = self.app.emit(
+            "chapter-finished",
+            serde_json::json!({
+                "book_id": book_id,
+                "chapter_index": chapter_index,
+                "total_chapters": total_chapters,
+            }),
+        );
+    }
 }
 
 // ── Library Commands ──────────────────────────────────────────────
