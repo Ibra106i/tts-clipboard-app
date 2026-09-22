@@ -2,6 +2,7 @@ mod error;
 mod library;
 mod models;
 mod parser;
+mod text;
 
 // The playback module is the only Windows-specific part of the crate. On other
 // platforms a stub with the same surface reports `unsupported_platform`.

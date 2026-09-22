@@ -4,7 +4,7 @@ use tauri::{Emitter, State};
 use windows::Win32::Media::Speech::*;
 use windows::Win32::System::Com::*;
 
-const CHUNK_SIZE: usize = 2000;
+use crate::text;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TtsMode {
@@ -131,32 +131,6 @@ fn get_voice_status(voice: &ISpVoice) -> AppResult<SPVOICESTATUS> {
     }
 }
 
-fn chunk_text(text: &str) -> Vec<String> {
-    if text.len() <= CHUNK_SIZE {
-        return vec![text.to_string()];
-    }
-
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= CHUNK_SIZE {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        let cut_at = remaining[..CHUNK_SIZE]
-            .rfind(['.', '!', '?'])
-            .map(|i| i + 1)
-            .unwrap_or_else(|| remaining[..CHUNK_SIZE].rfind(' ').unwrap_or(CHUNK_SIZE));
-
-        chunks.push(remaining[..cut_at].to_string());
-        remaining = remaining[cut_at..].trim_start();
-    }
-
-    chunks
-}
-
 fn speak_next_chunk(state: &TtsState) -> AppResult<bool> {
     let chunks = state
         .chunks
@@ -229,7 +203,10 @@ pub fn speak_text(text: String, state: State<'_, TtsState>) -> AppResult<()> {
         *mode = TtsMode::PlayingClipboard;
     }
 
-    let chunks = chunk_text(&text);
+    let chunks: Vec<String> = text::split_into_chunks(&text, text::CHUNK_CHARS)
+        .into_iter()
+        .map(|chunk| chunk.text)
+        .collect();
     {
         let mut state_chunks = state
             .inner()
@@ -353,7 +330,10 @@ pub fn speak_book_chapter(
         };
     }
 
-    let chunks = chunk_text(&text);
+    let chunks: Vec<String> = text::split_into_chunks(&text, text::CHUNK_CHARS)
+        .into_iter()
+        .map(|chunk| chunk.text)
+        .collect();
     {
         let mut state_chunks = state
             .inner()
@@ -546,43 +526,4 @@ pub fn stop_tts(state: State<'_, TtsState>) -> AppResult<()> {
         .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = 0;
     log::info!("playback stopped");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn short_text_stays_a_single_chunk() {
-        assert_eq!(chunk_text("Hello world."), vec!["Hello world.".to_string()]);
-    }
-
-    #[test]
-    fn text_at_the_chunk_limit_is_not_split() {
-        let text = "a".repeat(CHUNK_SIZE);
-        assert_eq!(chunk_text(&text).len(), 1);
-    }
-
-    /// Non-whitespace content must survive chunking byte-for-byte, and chunk
-    /// boundaries are allowed to drop only separator whitespace.
-    fn non_whitespace(input: &str) -> String {
-        input.chars().filter(|c| !c.is_whitespace()).collect()
-    }
-
-    #[test]
-    fn long_ascii_text_is_split_without_losing_content() {
-        let long = format!(
-            "{} {}",
-            "First sentence. ".repeat(200),
-            "Second. ".repeat(200)
-        );
-        let chunks = chunk_text(&long);
-
-        assert!(
-            chunks.len() > 1,
-            "expected multiple chunks, got {}",
-            chunks.len()
-        );
-        assert_eq!(non_whitespace(&chunks.concat()), non_whitespace(&long));
-    }
 }
