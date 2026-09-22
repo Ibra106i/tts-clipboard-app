@@ -231,6 +231,16 @@ pub fn speak_text(text: String, state: State<'_, TtsState>) -> AppResult<()> {
     }
 
     speak_next_chunk(state.inner())?;
+    log::info!(
+        "clipboard playback started ({} characters, {} chunks)",
+        text.chars().count(),
+        state
+            .inner()
+            .chunks
+            .lock()
+            .map(|c| c.len())
+            .unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -345,6 +355,16 @@ pub fn speak_book_chapter(
     }
 
     speak_next_chunk(state.inner())?;
+    log::info!(
+        "chapter playback started ({} characters, {} chunks)",
+        text.chars().count(),
+        state
+            .inner()
+            .chunks
+            .lock()
+            .map(|c| c.len())
+            .unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -365,8 +385,10 @@ pub fn pause_resume_tts(state: State<'_, TtsState>) -> AppResult<bool> {
                 .Resume()
                 .map_err(|e| AppError::playback(format!("speech could not resume ({e})")))?;
         }
+        log::debug!("playback resumed");
         Ok(false)
     } else {
+        log::debug!("playback paused");
         unsafe {
             voice
                 .Pause()
@@ -393,6 +415,7 @@ pub fn set_tts_rate(rate: f32, state: State<'_, TtsState>) -> AppResult<()> {
             .SetRate(sapi_rate)
             .map_err(|e| AppError::playback(format!("speech rate could not be changed ({e})")))?;
     }
+    log::debug!("speech rate set to {rate}x (SAPI rate {sapi_rate})");
     Ok(())
 }
 
@@ -496,6 +519,7 @@ pub fn stop_tts(state: State<'_, TtsState>) -> AppResult<()> {
     *tts.total_chars_spoken
         .lock()
         .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = 0;
+    log::info!("playback stopped");
     Ok(())
 }
 

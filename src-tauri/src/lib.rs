@@ -5,6 +5,7 @@ mod parser;
 mod tts;
 
 use crate::error::{AppError, AppResult};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tauri::Manager;
@@ -25,12 +26,40 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(tts::TtsState::new())
         .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
+            // Logging is always on, in debug and release. A release build with
+            // no logs turned every recoverable failure into an unexplained
+            // symptom for the user.
+            let level = if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            };
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(level)
+                    .targets([
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                            file_name: Some("tts-clipboard-app".into()),
+                        }),
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    ])
+                    .max_file_size(2_000_000)
+                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
+                    .build(),
+            )?;
+            log::info!(
+                "starting {} v{} ({})",
+                app.package_info().name,
+                app.package_info().version,
+                if cfg!(debug_assertions) {
+                    "debug"
+                } else {
+                    "release"
+                }
+            );
+            match app.path().app_log_dir() {
+                Ok(dir) => log::info!("log directory: {}", dir.display()),
+                Err(e) => log::warn!("log directory unavailable: {e}"),
             }
 
             // Initialize TTS voice
@@ -129,6 +158,14 @@ pub fn run() {
                         return Ok(());
                     }
                 };
+                let logs_item = match MenuItemBuilder::with_id("logs", "Open log folder").build(app)
+                {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Failed to create logs menu item: {e}");
+                        return Ok(());
+                    }
+                };
                 let quit_item = match MenuItemBuilder::with_id("quit", "Quit").build(app) {
                     Ok(item) => item,
                     Err(e) => {
@@ -138,6 +175,7 @@ pub fn run() {
                 };
                 let menu = match MenuBuilder::new(app)
                     .item(&show_item)
+                    .item(&logs_item)
                     .item(&quit_item)
                     .build()
                 {
@@ -160,7 +198,13 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
+                        "logs" => {
+                            if let Err(e) = open_log_folder(&handle) {
+                                log::error!("Failed to open the log folder: {e}");
+                            }
+                        }
                         "quit" => {
+                            log::info!("shutting down");
                             handle.exit(0);
                         }
                         _ => {}
@@ -198,6 +242,7 @@ pub fn run() {
             cmd_delete_book,
             cmd_get_book_chapters,
             cmd_save_reading_position,
+            cmd_open_logs_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -221,9 +266,17 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
     let text = tts::read_clipboard()?;
 
     if text.trim().is_empty() {
+        log::info!("hotkey pressed with an empty clipboard");
         let _ = app.emit("clipboard-empty", ());
         return Ok(());
     }
+
+    // The clipboard content itself is never logged: it is the most private data
+    // this application touches. Only its size is recorded.
+    log::info!(
+        "hotkey pressed with {} characters on the clipboard",
+        text.chars().count()
+    );
 
     let display_text = if text.len() > MAX_CLIPBOARD_LEN {
         let truncated: String = text.chars().take(MAX_CLIPBOARD_LEN).collect();
@@ -258,6 +311,51 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
 
 // ── Library Commands ──────────────────────────────────────────────
 
+/// Log a command's outcome in one place, so every backend failure is recorded
+/// with its diagnostic detail regardless of where it originated.
+fn log_result<T>(operation: &str, result: &AppResult<T>) {
+    match result {
+        Ok(_) => log::debug!("{operation}: ok"),
+        Err(error) => log::error!(
+            "{operation}: failed [{}] {} (detail: {:?})",
+            error.code(),
+            error.user_message(),
+            error.detail()
+        ),
+    }
+}
+
+/// Where the running application writes its rotated log files.
+fn log_directory(app: &tauri::AppHandle) -> AppResult<PathBuf> {
+    app.path()
+        .app_log_dir()
+        .map_err(|e| AppError::storage("locate", format!("log directory: {e}")))
+}
+
+#[cfg(windows)]
+fn open_log_folder(app: &tauri::AppHandle) -> AppResult<()> {
+    let dir = log_directory(app)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::storage("create", format!("log directory: {e}")))?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map_err(|e| AppError::storage("open", format!("log directory: {e}")))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn open_log_folder(_app: &tauri::AppHandle) -> AppResult<()> {
+    Err(AppError::internal(
+        "opening the log folder is only implemented on Windows",
+    ))
+}
+
+#[tauri::command]
+async fn cmd_open_logs_folder(app: tauri::AppHandle) -> AppResult<()> {
+    open_log_folder(&app)
+}
+
 #[tauri::command]
 async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
@@ -276,17 +374,44 @@ async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>
 
 #[tauri::command]
 async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> AppResult<models::Book> {
-    library::import_book(file_path, &app)
+    let result = library::import_book(file_path, &app);
+    match &result {
+        Ok(book) => log::info!(
+            "imported \"{}\" ({} chapters, {})",
+            book.title,
+            book.total_chapters,
+            book.file_type
+        ),
+        Err(error) => log::error!(
+            "import failed [{}] {} (detail: {:?})",
+            error.code(),
+            error.user_message(),
+            error.detail()
+        ),
+    }
+    result
 }
 
 #[tauri::command]
 async fn cmd_get_library(app: tauri::AppHandle) -> AppResult<Vec<models::Book>> {
-    library::get_library(&app)
+    let result = library::get_library(&app);
+    log_result("get library", &result);
+    result
 }
 
 #[tauri::command]
 async fn cmd_delete_book(book_id: String, app: tauri::AppHandle) -> AppResult<()> {
-    library::delete_book(&book_id, &app)
+    let result = library::delete_book(&book_id, &app);
+    match &result {
+        Ok(()) => log::info!("deleted book {book_id}"),
+        Err(error) => log::error!(
+            "delete failed [{}] {} (detail: {:?})",
+            error.code(),
+            error.user_message(),
+            error.detail()
+        ),
+    }
+    result
 }
 
 #[tauri::command]
@@ -294,7 +419,9 @@ async fn cmd_get_book_chapters(
     book_id: String,
     app: tauri::AppHandle,
 ) -> AppResult<Vec<models::Chapter>> {
-    library::get_book_chapters(&book_id, &app)
+    let result = library::get_book_chapters(&book_id, &app);
+    log_result(&format!("get chapters for {book_id}"), &result);
+    result
 }
 
 #[tauri::command]
@@ -304,5 +431,7 @@ async fn cmd_save_reading_position(
     position: usize,
     app: tauri::AppHandle,
 ) -> AppResult<()> {
-    library::save_reading_position(&book_id, chapter, position, &app)
+    let result = library::save_reading_position(&book_id, chapter, position, &app);
+    log_result(&format!("save position {book_id}/{chapter}"), &result);
+    result
 }
