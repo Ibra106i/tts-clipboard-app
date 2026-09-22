@@ -18,7 +18,12 @@ pub const MAX_RATE: f32 = 4.0;
 pub const DEFAULT_RATE: f32 = 1.0;
 
 /// What is currently being spoken.
+///
+/// Serialized as `{ "kind": "clipboard" }` or
+/// `{ "kind": "book", "book_id": ..., ... }`. The wire shape is pinned by a
+/// test because the frontend's typed IPC layer depends on it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlaybackSource {
     Clipboard,
     Book {
@@ -37,8 +42,10 @@ impl PlaybackSource {
     }
 }
 
-/// Coarse playback state for the UI.
+/// Coarse playback state for the UI. Serialized as `"idle"`, `"playing"` or
+/// `"paused"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PlaybackStatus {
     Idle,
     Playing,
@@ -557,12 +564,30 @@ mod tests {
         let after = state.snapshot(0);
         assert_eq!(after.spoken_chars, before.spoken_chars);
         assert_eq!(after.finished, before.finished);
-        assert_eq!(after.status, before.status);
+        assert_eq!(after.status, before.status);        // The chunk cursor is still exactly where the writer left it.
+        assert!(state.advance_chunk(), "the next chunk is the one after read");
+    }
 
-        // The chunk cursor is still exactly where the writer left it.
-        assert!(
-            state.advance_chunk(),
-            "the next chunk is the one after read"
-        );
+    /// The frontend's typed IPC layer decodes these shapes. Pinning them here
+    /// means a rename cannot silently break the webview at runtime.
+    #[test]
+    fn the_wire_shape_of_snapshots_is_stable() {
+        let mut state = PlaybackState::new();
+        state.start(book_job("book-1", 2, "hello world"));
+
+        let value = serde_json::to_value(state.snapshot(0)).expect("serialize snapshot");
+
+        assert_eq!(value["status"], "playing");
+        assert_eq!(value["source"]["kind"], "book");
+        assert_eq!(value["source"]["book_id"], "book-1");
+        assert_eq!(value["source"]["chapter_index"], 2);
+        assert_eq!(value["total_chars"], 11);
+        assert_eq!(value["spoken_chars"], 0);
+        assert!(value["finished"].is_boolean());
+
+        let idle = PlaybackState::new();
+        let value = serde_json::to_value(idle.snapshot(0)).expect("serialize idle snapshot");
+        assert_eq!(value["status"], "idle");
+        assert!(value["source"].is_null());
     }
 }
