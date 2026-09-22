@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { estimateDurationMs, formatTime, percentOf } from "./lib/format";
 import { describeError } from "./lib/errors";
 import * as ipc from "./lib/ipc";
+import { SPEEDS, usePlayback } from "./hooks/usePlayback";
 import type {
   Book,
   Chapter,
@@ -12,28 +13,11 @@ import type {
 } from "./lib/types";
 import "./App.css";
 
-// ── Constants ──────────────────────────────────────────────────────
-
-const SPEEDS = [1, 1.25, 1.5, 2] as const;
-
 // ── Overlay App (Clipboard TTS) ────────────────────────────────────
 
 function OverlayApp() {
-  const [text, setText] = useState("");
-  const [isPaused, setIsPaused] = useState(false);
-  const [speedIdx, setSpeedIdx] = useState(0);
-  const [progress, setProgress] = useState(0);
-  const [elapsed, setElapsed] = useState(0);
-  const [estimatedTotal, setEstimatedTotal] = useState(0);
   const [toast, setToast] = useState("");
-
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Elapsed time is measured here, locally, and only while the backend says
-  // playback is actually running. It is a clock, not control flow: it never
-  // asks the backend anything and can never advance playback.
-  const [isPlaying, setIsPlaying] = useState(false);
-  const startedAtRef = useRef<number>(0);
-  const accumulatedRef = useRef<number>(0);
 
   const showToast = useCallback((msg: string, duration = 2000) => {
     setToast(msg);
@@ -41,81 +25,10 @@ function OverlayApp() {
     toastTimer.current = setTimeout(() => setToast(""), duration);
   }, []);
 
-  useEffect(() => {
-    if (!isPlaying || isPaused) return;
-    startedAtRef.current = Date.now();
-    const timer = setInterval(() => {
-      setElapsed(
-        accumulatedRef.current + (Date.now() - startedAtRef.current)
-      );
-    }, 250);
-    return () => {
-      clearInterval(timer);
-      accumulatedRef.current += Date.now() - startedAtRef.current;
-    };
-  }, [isPlaying, isPaused]);
-
   // The overlay is a *view*. It never starts speech; the backend's hotkey
-  // handler is the single owner of the clipboard flow, and the actor's
-  // `playback-state` events are the only thing that drives this UI.
-  useEffect(() => {
-    const unlistens: (() => void)[] = [];
-    const setup = async () => {
-      unlistens.push(
-        await listen<PlaybackSnapshot>("playback-state", (event) => {
-          const snapshot = event.payload;
-          setText(snapshot.text_preview);
-          setIsPaused(snapshot.status === "paused");
-          setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
-          setEstimatedTotal(
-            estimateDurationMs(snapshot.total_chars, snapshot.rate)
-          );
-
-          const isThisJob = snapshot.source?.kind === "clipboard";
-          setIsPlaying(isThisJob && snapshot.status === "playing");
-          if (!isThisJob || snapshot.finished) {
-            accumulatedRef.current = 0;
-            setElapsed(0);
-          }
-        })
-      );
-      unlistens.push(
-        await listen("clipboard-empty", () => {
-          showToast("Copy some text first!");
-        })
-      );
-      unlistens.push(
-        await listen("tts-busy", () => {
-          showToast("Finish current playback first");
-        })
-      );
-    };
-    void setup();
-    return () => {
-      unlistens.forEach((fn) => fn());
-    };
-  }, [showToast]);
-
-  const togglePause = async () => {
-    try {
-      const paused = await ipc.pauseResume();
-      setIsPaused(paused);
-    } catch (err) {
-      showToast(describeError(err));
-      console.error("pause_resume error:", err);
-    }
-  };
-
-  const cycleSpeed = async () => {
-    const next = (speedIdx + 1) % SPEEDS.length;
-    setSpeedIdx(next);
-    try {
-      await ipc.setRate(SPEEDS[next]);
-    } catch (err) {
-      showToast(describeError(err));
-      console.error("set_tts_rate error:", err);
-    }
-  };
+  // handler owns the clipboard flow, and the actor's events drive this UI.
+  // Failures are reported straight to the toast, at the point they happen.
+  const playback = usePlayback({ onError: showToast });
 
   const closeOverlay = async () => {
     try {
@@ -128,7 +41,7 @@ function OverlayApp() {
 
   // The backend already truncates the preview in characters; slicing here by
   // `string.length` would cut UTF-16 code units and split astral characters.
-  const displayText = text;
+  const displayText = playback.snapshot?.text_preview ?? "";
 
   return (
     <div className="overlay-root">
@@ -140,26 +53,33 @@ function OverlayApp() {
         )}
       </div>
       <div className="controls">
-        <button className="btn-speed" onClick={cycleSpeed} title="Change speed">
-          {SPEEDS[speedIdx]}x
+        <button
+          className="btn-speed"
+          onClick={playback.cycleRate}
+          title="Change speed"
+        >
+          {playback.rate}x
         </button>
         <button
           className="btn-play"
-          onClick={togglePause}
-          disabled={!text}
-          title={isPaused ? "Resume" : "Pause"}
+          onClick={playback.togglePause}
+          disabled={!displayText}
+          title={playback.isPaused ? "Resume" : "Pause"}
         >
-          {isPaused ? "▶" : "⏸"}
+          {playback.isPaused ? "▶" : "⏸"}
         </button>
         <button className="btn-close" onClick={closeOverlay} title="Close">
           ×
         </button>
       </div>
       <div className="progress-track">
-        <div className="progress-fill" style={{ width: `${progress}%` }} />
+        <div
+          className="progress-fill"
+          style={{ width: `${playback.progressPercent}%` }}
+        />
       </div>
       <div className="time-display">
-        {formatTime(elapsed)} / {formatTime(estimatedTotal)}
+        {formatTime(playback.elapsedMs)} / {formatTime(playback.estimatedTotalMs)}
       </div>
     </div>
   );
