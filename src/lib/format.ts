@@ -60,6 +60,14 @@ export function percentOf(part: number, whole: number): number {
   return clampPercent((part / whole) * 100)
 }
 
+/**
+ * A clamped percentage as a CSS-ready string, e.g. `"42.5%"`.
+ * Used for progress bar widths so a bad value can never produce `NaN%`.
+ */
+export function formatPercent(value: number): string {
+  return `${clampPercent(value)}%`
+}
+
 /** Shorten `text` for display without splitting a surrogate pair. */
 export function previewText(text: string, maxChars: number): string {
   const characters = Array.from(text)
