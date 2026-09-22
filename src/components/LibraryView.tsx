@@ -11,9 +11,6 @@ export interface LibraryViewProps {
   onRefresh: () => Promise<void>;
   onOpenBook: (book: Book) => void;
   isDragging: boolean;
-  onDragOver: (event: React.DragEvent) => void;
-  onDragLeave: () => void;
-  onDrop: (event: React.DragEvent) => void;
   /** Where this view reports successes and failures. The container owns the
    * single toast for the window, so two views cannot show two messages. */
   onMessage: (message: string) => void;
@@ -24,9 +21,6 @@ export function LibraryView({
   onRefresh,
   onOpenBook,
   isDragging,
-  onDragOver,
-  onDragLeave,
-  onDrop,
   onMessage: showToast,
 }: LibraryViewProps) {
 
@@ -62,7 +56,7 @@ export function LibraryView({
   );
 
   return (
-    <div className="app-root" onDragOver={onDragOver} onDragLeave={onDragLeave} onDrop={onDrop}>
+    <div className="app-root">
       <header className="app-header">
         <h1 className="app-title">📚 TTS Library</h1>
         <button

@@ -7,6 +7,7 @@ import { ReaderView } from "./ReaderView";
 import { describeError } from "../lib/errors";
 import { fileNameOf, isSupportedFile } from "../lib/files";
 import { useToast } from "../hooks/useToast";
+import { useFileDrop } from "../hooks/useFileDrop";
 import { subscribe } from "../lib/subscribe";
 import * as ipc from "../lib/ipc";
 import type { Book, Chapter } from "../lib/types";
@@ -19,7 +20,6 @@ export function MainWindow() {
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [currentChapterIdx, setCurrentChapterIdx] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
 
   const toast = useToast();
   const showToast = toast.show;
@@ -112,32 +112,10 @@ export function MainWindow() {
     setCurrentChapterIdx(index);
   }, []);
 
-  // ── Drag and drop ────────────────────────────────────────────────
-  // Kept in the container because the drop target is the whole window.
-
-  const handleDragOver = useCallback((event: React.DragEvent) => {
-    if (event.dataTransfer.types.includes("Files")) {
-      event.preventDefault();
-      setIsDragging(true);
-    }
-  }, []);
-
-  const handleDragLeave = useCallback(() => {
-    setIsDragging(false);
-  }, []);
-
-  const handleDrop = useCallback(
-    (event: React.DragEvent) => {
-      event.preventDefault();
-      setIsDragging(false);
-      const names = Array.from(event.dataTransfer.files).map(
-        (file) => file.name,
-      );
-      if (names.length > 0) {
-        void importPaths(names);
-      }
-    },
-    [importPaths],
+  // Drag and drop is handled by the OS via Tauri, not by the browser's HTML5
+  // drop event, which cannot see filesystem paths inside a webview.
+  const { isDragging } = useFileDrop(
+    useCallback((paths: string[]) => void importPaths(paths), [importPaths]),
   );
 
   if (view === "reader" && selectedBook) {
@@ -164,9 +142,6 @@ export function MainWindow() {
         onRefresh={refreshLibrary}
         onOpenBook={(book) => void handleOpenBook(book)}
         isDragging={isDragging}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
         onMessage={showToast}
       />
       <Toast message={toast.message} />
