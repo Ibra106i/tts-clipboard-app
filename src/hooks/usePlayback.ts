@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as ipc from "../lib/ipc";
 import { describeError } from "../lib/errors";
+import { subscribeAll } from "../lib/subscribe";
 import { estimateDurationMs, percentOf } from "../lib/format";
 import type {
   ChapterFinished,
@@ -123,58 +124,35 @@ export function usePlayback(
     };
   }, [reportError]);
 
-  // Backend -> UI events. `setup` can be interrupted at any await, so the
-  // unlisten function is captured in `disposers` and drained on cleanup
-  // whether or not registration finished before unmount.
+  // Backend -> UI events. Registration is asynchronous, so it goes through
+  // `subscribeAll`, which guarantees that a listener registering after unmount
+  // is removed immediately and that StrictMode's double-mount cannot leave two
+  // live listeners for the same event.
   useEffect(() => {
-    const disposers: Array<() => void> = [];
-    let disposed = false;
+    const subscription = subscribeAll([
+      () =>
+        listen<PlaybackSnapshot>("playback-state", (event) => {
+          setSnapshot(event.payload);
+          if (event.payload.source === null || event.payload.finished) {
+            accumulatedRef.current = 0;
+            setElapsedMs(0);
+          }
+        }),
+      () =>
+        listen<ChapterFinished>("chapter-finished", (event) => {
+          callbacksRef.current.onChapterFinished?.(event.payload);
+        }),
+      () =>
+        listen("tts-busy", () => {
+          reportError("Finish the current playback first.");
+        }),
+      () =>
+        listen("clipboard-empty", () => {
+          reportError("Copy some text first.");
+        }),
+    ]);
 
-    const track = async (register: () => Promise<() => void>) => {
-      const unlisten = await register();
-      if (disposed) {
-        // Cleanup already ran: undo the registration immediately.
-        unlisten();
-      } else {
-        disposers.push(unlisten);
-      }
-    };
-
-    void track(() =>
-      listen<PlaybackSnapshot>("playback-state", (event) => {
-        setSnapshot(event.payload);
-        if (event.payload.source === null || event.payload.finished) {
-          accumulatedRef.current = 0;
-          setElapsedMs(0);
-        }
-      }),
-    );
-
-    void track(() =>
-      listen<ChapterFinished>("chapter-finished", (event) => {
-        callbacksRef.current.onChapterFinished?.(event.payload);
-      }),
-    );
-
-    void track(() =>
-      listen("tts-busy", () => {
-        reportError("Finish the current playback first.");
-      }),
-    );
-
-    void track(() =>
-      listen("clipboard-empty", () => {
-        reportError("Copy some text first.");
-      }),
-    );
-
-    return () => {
-      disposed = true;
-      for (const dispose of disposers) {
-        dispose();
-      }
-      disposers.length = 0;
-    };
+    return () => subscription.dispose();
   }, [reportError]);
 
   const cycleRate = useCallback(async () => {

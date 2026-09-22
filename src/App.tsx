@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { estimateDurationMs, formatTime, percentOf } from "./lib/format";
 import { describeError } from "./lib/errors";
 import * as ipc from "./lib/ipc";
 import { SPEEDS, usePlayback } from "./hooks/usePlayback";
+import { subscribe } from "./lib/subscribe";
 import type {
   Book,
   Chapter,
@@ -182,14 +182,11 @@ function MainApp() {
   // parsing it back out; the payload is now a structured object with the same
   // identity the backend used.
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-
-    const setup = async () => {
-      unlisten = await listen<ChapterFinished>(
-        "chapter-finished",
-        (event) => {
-          void (async () => {
-            const { book_id: bookId, chapter_index: chapterIdx } = event.payload;
+    const subscription = subscribe<ChapterFinished>(
+      "chapter-finished",
+      (payload) => {
+        void (async () => {
+            const { book_id: bookId, chapter_index: chapterIdx } = payload;
             if (!autoAdvanceRef.current) return;
             if (!selectedBook || selectedBook.id !== bookId) return;
 
@@ -235,11 +232,9 @@ function MainApp() {
             }
           })();
         }
-      );
-    };
+    );
 
-    void setup();
-    return () => unlisten?.();
+    return () => subscription.dispose();
   }, [
     selectedBook,
     chapters,
@@ -248,18 +243,13 @@ function MainApp() {
     stopProgressPolling,
   ]);
 
-  // Listen for tts-busy
+  // Busy notifications, registered through the lifecycle-safe helper so the
+  // unawaited-registration race cannot leave a duplicate listener behind.
   useEffect(() => {
-    const unlistens: (() => void)[] = [];
-    const setup = async () => {
-      unlistens.push(
-        await listen("tts-busy", () => {
-          showToast("Finish current playback first");
-        })
-      );
-    };
-    setup();
-    return () => unlistens.forEach((fn) => fn());
+    const subscription = subscribe("tts-busy", () => {
+      showToast("Finish current playback first");
+    });
+    return () => subscription.dispose();
   }, [showToast]);
 
   const handleImport = async (filePath: string) => {
