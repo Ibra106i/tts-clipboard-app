@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { formatTime } from "./lib/format";
 import "./App.css";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -26,13 +27,6 @@ interface Chapter {
 // ── Constants ──────────────────────────────────────────────────────
 
 const SPEEDS = [1, 1.25, 1.5, 2] as const;
-
-function formatTime(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return `${min}:${sec.toString().padStart(2, "0")}`;
-}
 
 // ── Overlay App (Clipboard TTS) ────────────────────────────────────
 

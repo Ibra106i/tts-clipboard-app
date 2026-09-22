@@ -376,3 +376,34 @@ pub fn stop_tts(state: State<'_, TtsState>) -> Result<(), String> {
     *tts.total_chars_spoken.lock().map_err(|e| e.to_string())? = 0;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_text_stays_a_single_chunk() {
+        assert_eq!(chunk_text("Hello world."), vec!["Hello world.".to_string()]);
+    }
+
+    #[test]
+    fn text_at_the_chunk_limit_is_not_split() {
+        let text = "a".repeat(CHUNK_SIZE);
+        assert_eq!(chunk_text(&text).len(), 1);
+    }
+
+    /// Non-whitespace content must survive chunking byte-for-byte, and chunk
+    /// boundaries are allowed to drop only separator whitespace.
+    fn non_whitespace(input: &str) -> String {
+        input.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn long_ascii_text_is_split_without_losing_content() {
+        let long = format!("{} {}", "First sentence. ".repeat(200), "Second. ".repeat(200));
+        let chunks = chunk_text(&long);
+
+        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        assert_eq!(non_whitespace(&chunks.concat()), non_whitespace(&long));
+    }
+}
