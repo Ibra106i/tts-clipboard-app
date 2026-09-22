@@ -83,6 +83,7 @@ dependencies = [
  "tauri-plugin-fs",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-log",
+ "thiserror 2.0.20",
  "uuid",
  "windows 0.58.0",
 ]

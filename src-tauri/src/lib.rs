@@ -1,8 +1,10 @@
+mod error;
 mod library;
 mod models;
 mod parser;
 mod tts;
 
+use crate::error::{AppError, AppResult};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tauri::Manager;
@@ -201,11 +203,15 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-async fn handle_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
+async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
     // Check if TTS is busy
     {
         let state = app.state::<tts::TtsState>();
-        let mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        let mode = state
+            .inner()
+            .mode
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback state lock: {e}")))?;
         if *mode != tts::TtsMode::Idle {
             let _ = app.emit("tts-busy", ());
             return Ok(());
@@ -228,8 +234,8 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default();
 
     let _ = app.emit(
         "speak-trigger",
@@ -253,7 +259,7 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
 // ── Library Commands ──────────────────────────────────────────────
 
 #[tauri::command]
-async fn cmd_open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
 
     let result = app
@@ -269,17 +275,17 @@ async fn cmd_open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
 }
 
 #[tauri::command]
-async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> Result<models::Book, String> {
+async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> AppResult<models::Book> {
     library::import_book(file_path, &app)
 }
 
 #[tauri::command]
-async fn cmd_get_library(app: tauri::AppHandle) -> Result<Vec<models::Book>, String> {
+async fn cmd_get_library(app: tauri::AppHandle) -> AppResult<Vec<models::Book>> {
     library::get_library(&app)
 }
 
 #[tauri::command]
-async fn cmd_delete_book(book_id: String, app: tauri::AppHandle) -> Result<(), String> {
+async fn cmd_delete_book(book_id: String, app: tauri::AppHandle) -> AppResult<()> {
     library::delete_book(&book_id, &app)
 }
 
@@ -287,7 +293,7 @@ async fn cmd_delete_book(book_id: String, app: tauri::AppHandle) -> Result<(), S
 async fn cmd_get_book_chapters(
     book_id: String,
     app: tauri::AppHandle,
-) -> Result<Vec<models::Chapter>, String> {
+) -> AppResult<Vec<models::Chapter>> {
     library::get_book_chapters(&book_id, &app)
 }
 
@@ -297,6 +303,6 @@ async fn cmd_save_reading_position(
     chapter: usize,
     position: usize,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> AppResult<()> {
     library::save_reading_position(&book_id, chapter, position, &app)
 }

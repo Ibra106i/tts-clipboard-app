@@ -1,3 +1,4 @@
+use crate::error::{AppError, AppResult};
 use std::sync::Mutex;
 use tauri::{Emitter, State};
 use windows::Win32::Media::Speech::*;
@@ -86,21 +87,21 @@ fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
     }
 }
 
-pub fn read_clipboard() -> Result<String, String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
+pub fn read_clipboard() -> AppResult<String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| AppError::playback(format!("clipboard unavailable ({e})")))?;
     clipboard
         .get_text()
-        .map_err(|e| format!("Clipboard read failed: {e}"))
+        .map_err(|e| AppError::playback(format!("the clipboard could not be read ({e})")))
 }
 
-fn get_voice_status(voice: &ISpVoice) -> Result<SPVOICESTATUS, String> {
+fn get_voice_status(voice: &ISpVoice) -> AppResult<SPVOICESTATUS> {
     unsafe {
         let mut status = SPVOICESTATUS::default();
         let mut bookmark = windows::core::PWSTR::null();
         voice
             .GetStatus(&mut status, &mut bookmark)
-            .map_err(|e| format!("GetStatus failed: {e}"))?;
+            .map_err(|e| AppError::playback(format!("speech status unavailable ({e})")))?;
         Ok(status)
     }
 }
@@ -131,9 +132,15 @@ fn chunk_text(text: &str) -> Vec<String> {
     chunks
 }
 
-fn speak_next_chunk(state: &TtsState) -> Result<bool, String> {
-    let chunks = state.chunks.lock().map_err(|e| e.to_string())?;
-    let mut idx = state.current_chunk.lock().map_err(|e| e.to_string())?;
+fn speak_next_chunk(state: &TtsState) -> AppResult<bool> {
+    let chunks = state
+        .chunks
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    let mut idx = state
+        .current_chunk
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
 
     if *idx >= chunks.len() {
         return Ok(false); // No more chunks
@@ -142,13 +149,18 @@ fn speak_next_chunk(state: &TtsState) -> Result<bool, String> {
     let text = chunks[*idx].clone();
     *idx += 1;
 
-    let voice_guard = state.voice.lock().map_err(|e| e.to_string())?;
-    let voice = voice_guard.as_ref().ok_or("TTS voice not initialized")?;
+    let voice_guard = state
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    let voice = voice_guard
+        .as_ref()
+        .ok_or_else(|| AppError::playback("the speech voice is not available"))?;
     let htext = windows::core::HSTRING::from(&text);
     unsafe {
         voice
             .Speak(&htext, SPF_ASYNC.0 as u32, Some(std::ptr::null_mut()))
-            .map_err(|e| format!("Speak failed: {e}"))?;
+            .map_err(|e| AppError::playback(format!("speech could not start ({e})")))?;
     }
     Ok(true)
 }
@@ -169,24 +181,36 @@ pub fn get_chars_before_current_chunk(state: &TtsState) -> u32 {
 
 /// Speak text as clipboard (single chunk, no auto-advance)
 #[tauri::command]
-pub fn speak_text(text: String, state: State<'_, TtsState>) -> Result<(), String> {
+pub fn speak_text(text: String, state: State<'_, TtsState>) -> AppResult<()> {
     // Check if something is already playing
     {
-        let mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        let mode = state
+            .inner()
+            .mode
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         if *mode != TtsMode::Idle {
-            return Err("busy".to_string());
+            return Err(AppError::Busy);
         }
     }
 
     // Set mode to clipboard
     {
-        let mut mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        let mut mode = state
+            .inner()
+            .mode
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         *mode = TtsMode::PlayingClipboard;
     }
 
     let chunks = chunk_text(&text);
     {
-        let mut state_chunks = state.inner().chunks.lock().map_err(|e| e.to_string())?;
+        let mut state_chunks = state
+            .inner()
+            .chunks
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         *state_chunks = chunks;
     }
     {
@@ -219,10 +243,14 @@ pub fn speak_book_chapter(
     total_chapters: usize,
     state: State<'_, TtsState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> AppResult<()> {
     // Check previous mode and emit interruption event if something was playing
     let previous_mode = {
-        let mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        let mode = state
+            .inner()
+            .mode
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         mode.clone()
     };
 
@@ -260,7 +288,11 @@ pub fn speak_book_chapter(
 
     // Stop any current playback
     {
-        let voice_guard = state.inner().voice.lock().map_err(|e| e.to_string())?;
+        let voice_guard = state
+            .inner()
+            .voice
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         if let Some(voice) = voice_guard.as_ref() {
             unsafe {
                 let _ = voice.Speak(
@@ -274,7 +306,11 @@ pub fn speak_book_chapter(
 
     // Set mode to book
     {
-        let mut mode = state.inner().mode.lock().map_err(|e| e.to_string())?;
+        let mut mode = state
+            .inner()
+            .mode
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         *mode = TtsMode::PlayingBook {
             book_id,
             chapter_index,
@@ -284,7 +320,11 @@ pub fn speak_book_chapter(
 
     let chunks = chunk_text(&text);
     {
-        let mut state_chunks = state.inner().chunks.lock().map_err(|e| e.to_string())?;
+        let mut state_chunks = state
+            .inner()
+            .chunks
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         *state_chunks = chunks;
     }
     {
@@ -309,48 +349,70 @@ pub fn speak_book_chapter(
 }
 
 #[tauri::command]
-pub fn pause_resume_tts(state: State<'_, TtsState>) -> Result<bool, String> {
+pub fn pause_resume_tts(state: State<'_, TtsState>) -> AppResult<bool> {
     let tts = state.inner();
-    let voice_guard = tts.voice.lock().map_err(|e| e.to_string())?;
-    let voice = voice_guard.as_ref().ok_or("TTS voice not initialized")?;
+    let voice_guard = tts
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    let voice = voice_guard
+        .as_ref()
+        .ok_or_else(|| AppError::playback("the speech voice is not available"))?;
     let status = get_voice_status(voice)?;
     if status.dwRunningState == SPAS_PAUSE.0 as u32 {
         unsafe {
-            voice.Resume().map_err(|e| format!("Resume failed: {e}"))?;
+            voice
+                .Resume()
+                .map_err(|e| AppError::playback(format!("speech could not resume ({e})")))?;
         }
         Ok(false)
     } else {
         unsafe {
-            voice.Pause().map_err(|e| format!("Pause failed: {e}"))?;
+            voice
+                .Pause()
+                .map_err(|e| AppError::playback(format!("speech could not pause ({e})")))?;
         }
         Ok(true)
     }
 }
 
 #[tauri::command]
-pub fn set_tts_rate(rate: f32, state: State<'_, TtsState>) -> Result<(), String> {
+pub fn set_tts_rate(rate: f32, state: State<'_, TtsState>) -> AppResult<()> {
     let tts = state.inner();
-    let voice_guard = tts.voice.lock().map_err(|e| e.to_string())?;
-    let voice = voice_guard.as_ref().ok_or("TTS voice not initialized")?;
+    let voice_guard = tts
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    let voice = voice_guard
+        .as_ref()
+        .ok_or_else(|| AppError::playback("the speech voice is not available"))?;
     let sapi_rate = ((rate - 1.0) * 13.333) as i32;
     let sapi_rate = sapi_rate.clamp(-10, 10);
     unsafe {
         voice
             .SetRate(sapi_rate)
-            .map_err(|e| format!("SetRate failed: {e}"))?;
+            .map_err(|e| AppError::playback(format!("speech rate could not be changed ({e})")))?;
     }
     Ok(())
 }
 
 /// Returns (current_pos, total_chars, mode_clone, is_chunk_done)
 #[tauri::command]
-pub fn get_speech_position(state: State<'_, TtsState>) -> Result<(u32, u32, String, bool), String> {
+pub fn get_speech_position(state: State<'_, TtsState>) -> AppResult<(u32, u32, String, bool)> {
     let tts = state.inner();
-    let voice_guard = tts.voice.lock().map_err(|e| e.to_string())?;
-    let voice = voice_guard.as_ref().ok_or("TTS voice not initialized")?;
+    let voice_guard = tts
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    let voice = voice_guard
+        .as_ref()
+        .ok_or_else(|| AppError::playback("the speech voice is not available"))?;
     let status = get_voice_status(voice)?;
 
-    let mode = tts.mode.lock().map_err(|e| e.to_string())?;
+    let mode = tts
+        .mode
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
     let mode_str = match &*mode {
         TtsMode::Idle => "idle".to_string(),
         TtsMode::PlayingClipboard => "clipboard".to_string(),
@@ -370,8 +432,14 @@ pub fn get_speech_position(state: State<'_, TtsState>) -> Result<(u32, u32, Stri
 
     // If chunk is done and we have more chunks, speak next
     if is_done {
-        let idx = tts.current_chunk.lock().map_err(|e| e.to_string())?;
-        let chunks = tts.chunks.lock().map_err(|e| e.to_string())?;
+        let idx = tts
+            .current_chunk
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+        let chunks = tts
+            .chunks
+            .lock()
+            .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
         let has_more = *idx < chunks.len();
         drop(idx);
         drop(chunks);
@@ -381,8 +449,13 @@ pub fn get_speech_position(state: State<'_, TtsState>) -> Result<(u32, u32, Stri
             drop(mode);
             speak_next_chunk(tts)?;
             // Re-read position after speaking next chunk
-            let voice_guard2 = tts.voice.lock().map_err(|e| e.to_string())?;
-            let voice2 = voice_guard2.as_ref().ok_or("TTS voice not initialized")?;
+            let voice_guard2 = tts
+                .voice
+                .lock()
+                .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+            let voice2 = voice_guard2
+                .as_ref()
+                .ok_or_else(|| AppError::playback("the speech voice is not available"))?;
             let status2 = get_voice_status(voice2)?;
             let before2 = get_chars_before_current_chunk(tts);
             return Ok((before2 + status2.ulInputWordPos, total, mode_str, false));
@@ -394,9 +467,12 @@ pub fn get_speech_position(state: State<'_, TtsState>) -> Result<(u32, u32, Stri
 }
 
 #[tauri::command]
-pub fn stop_tts(state: State<'_, TtsState>) -> Result<(), String> {
+pub fn stop_tts(state: State<'_, TtsState>) -> AppResult<()> {
     let tts = state.inner();
-    let voice_guard = tts.voice.lock().map_err(|e| e.to_string())?;
+    let voice_guard = tts
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
     if let Some(voice) = voice_guard.as_ref() {
         unsafe {
             let _ = voice.Speak(
@@ -408,10 +484,18 @@ pub fn stop_tts(state: State<'_, TtsState>) -> Result<(), String> {
     }
     drop(voice_guard);
 
-    *tts.mode.lock().map_err(|e| e.to_string())? = TtsMode::Idle;
-    *tts.chunks.lock().map_err(|e| e.to_string())? = Vec::new();
-    *tts.current_chunk.lock().map_err(|e| e.to_string())? = 0;
-    *tts.total_chars_spoken.lock().map_err(|e| e.to_string())? = 0;
+    *tts.mode
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = TtsMode::Idle;
+    *tts.chunks
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = Vec::new();
+    *tts.current_chunk
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = 0;
+    *tts.total_chars_spoken
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))? = 0;
     Ok(())
 }
 

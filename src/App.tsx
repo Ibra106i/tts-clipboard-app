@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { formatTime } from "./lib/format";
+import { ERROR_CODES, describeError, isErrorCode } from "./lib/errors";
 import "./App.css";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -107,10 +108,10 @@ function OverlayApp() {
               await invoke("speak_text", { text: t });
               startProgressPolling(t.length);
             } catch (err) {
-              if (err === "busy") {
+              if (isErrorCode(err, ERROR_CODES.busy)) {
                 showToast("Finish current playback first");
               } else {
-                showToast("TTS failed to initialize");
+                showToast(describeError(err));
               }
               console.error("speak_text error:", err);
             }
@@ -391,7 +392,7 @@ function MainApp() {
       await refreshLibrary();
       showToast("Book imported!");
     } catch (err) {
-      showToast(`Import failed: ${err}`);
+      showToast(`Import failed: ${describeError(err)}`);
       console.error("Import error:", err);
     }
   };
@@ -411,7 +412,7 @@ function MainApp() {
       await refreshLibrary();
       showToast("Book deleted");
     } catch (err) {
-      showToast(`Delete failed: ${err}`);
+      showToast(`Delete failed: ${describeError(err)}`);
     }
   };
 
@@ -428,7 +429,7 @@ function MainApp() {
       setElapsed(0);
       setView("reader");
     } catch (err) {
-      showToast(`Failed to load book: ${err}`);
+      showToast(`Failed to load book: ${describeError(err)}`);
     }
   };
 
