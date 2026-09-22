@@ -7,8 +7,8 @@ import * as ipc from "./lib/ipc";
 import type {
   Book,
   Chapter,
+  ChapterFinished,
   PlaybackSnapshot,
-  PlaybackSource,
 } from "./lib/types";
 import "./App.css";
 
@@ -248,21 +248,6 @@ function MainApp() {
           const snapshot: PlaybackSnapshot = await ipc.getPlaybackState();
           setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
           setElapsed(Date.now() - startTimeRef.current);
-
-          // Auto-advance: a book chapter that has finished speaking.
-          if (
-            snapshot.finished &&
-            snapshot.source?.kind === "book" &&
-            autoAdvanceRef.current
-          ) {
-            autoAdvanceRef.current = false;
-            stopProgressPolling();
-            window.dispatchEvent(
-              new CustomEvent("auto-advance-chapter", {
-                detail: snapshot.source,
-              })
-            );
-          }
         } catch (err) {
           console.error("progress read failed:", err);
         }
@@ -271,57 +256,77 @@ function MainApp() {
     [stopProgressPolling]
   );
 
-  // Listen for auto-advance events
+  // Auto-advance is driven by a typed backend event, not by a browser
+  // CustomEvent. The old design smuggled a book id and chapter index through a
+  // `"book:<id>:<chapter>"` string on `window`, and reconstructed state by
+  // parsing it back out; the payload is now a structured object with the same
+  // identity the backend used.
   useEffect(() => {
-    const handler = async (e: Event) => {
-      const source = (e as CustomEvent).detail as PlaybackSource;
-      if (source?.kind !== "book") return;
-      const { book_id: bookId, chapter_index: chapterIdx } = source;
-      const nextIdx = chapterIdx + 1;
+    let unlisten: (() => void) | undefined;
 
-      if (!selectedBook || selectedBook.id !== bookId) return;
-      if (nextIdx >= chapters.length) {
-        showToast("Book finished!");
-        return;
-      }
+    const setup = async () => {
+      unlisten = await listen<ChapterFinished>(
+        "chapter-finished",
+        (event) => {
+          void (async () => {
+            const { book_id: bookId, chapter_index: chapterIdx } = event.payload;
+            if (!autoAdvanceRef.current) return;
+            if (!selectedBook || selectedBook.id !== bookId) return;
 
-      // Auto-advance to next chapter
-      setCurrentChapterIdx(nextIdx);
-      setIsPaused(false);
-      setProgress(0);
-      setElapsed(0);
+            autoAdvanceRef.current = false;
+            stopProgressPolling();
 
-      try {
-        await ipc.saveReadingPosition({
-          bookId,
-          chapter: nextIdx,
-          position: 0,
-        });
-      } catch (err) {
-        console.warn("save reading position failed:", err);
-      }
+            const nextIdx = chapterIdx + 1;
+            if (nextIdx >= chapters.length) {
+              showToast("Book finished!");
+              return;
+            }
 
-      // Speak the next chapter
-      const nextChapter = chapters.find((c) => c.index === nextIdx);
-      if (nextChapter) {
-        try {
-          await ipc.speakBookChapter({
-            text: nextChapter.content,
-            bookId,
-            chapterIndex: nextIdx,
-            totalChapters: chapters.length,
-          });
-          autoAdvanceRef.current = true;
-          startProgressPolling(nextChapter.content.length);
-        } catch (err) {
-          console.error("auto-advance speak error:", err);
+            setCurrentChapterIdx(nextIdx);
+            setIsPaused(false);
+            setProgress(0);
+            setElapsed(0);
+
+            try {
+              await ipc.saveReadingPosition({
+                bookId,
+                chapter: nextIdx,
+                position: 0,
+              });
+            } catch (err) {
+              showToast(`Could not save your place: ${describeError(err)}`);
+            }
+
+            const nextChapter = chapters.find((c) => c.index === nextIdx);
+            if (!nextChapter) return;
+
+            try {
+              await ipc.speakBookChapter({
+                text: nextChapter.content,
+                bookId,
+                chapterIndex: nextIdx,
+                totalChapters: chapters.length,
+              });
+              autoAdvanceRef.current = true;
+              startProgressPolling(nextChapter.content.length);
+            } catch (err) {
+              showToast(`Could not continue: ${describeError(err)}`);
+              console.error("auto-advance speak error:", err);
+            }
+          })();
         }
-      }
+      );
     };
 
-    window.addEventListener("auto-advance-chapter", handler);
-    return () => window.removeEventListener("auto-advance-chapter", handler);
-  }, [selectedBook, chapters, showToast, startProgressPolling]);
+    void setup();
+    return () => unlisten?.();
+  }, [
+    selectedBook,
+    chapters,
+    showToast,
+    startProgressPolling,
+    stopProgressPolling,
+  ]);
 
   // Listen for tts-busy
   useEffect(() => {
