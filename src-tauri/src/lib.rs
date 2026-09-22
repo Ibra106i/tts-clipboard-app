@@ -237,7 +237,6 @@ pub fn run() {
             playback::commands::speak_book_chapter,
             playback::commands::pause_resume_tts,
             playback::commands::set_tts_rate,
-            playback::commands::get_speech_position,
             playback::commands::playback_get_state,
             playback::commands::stop_tts,
             cmd_open_file_dialog,

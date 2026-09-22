@@ -1,29 +1,16 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { formatTime } from "./lib/format";
+import { estimateDurationMs, formatTime, percentOf } from "./lib/format";
 import { ERROR_CODES, describeError, isErrorCode } from "./lib/errors";
+import * as ipc from "./lib/ipc";
+import type {
+  Book,
+  Chapter,
+  PlaybackSnapshot,
+  PlaybackSource,
+} from "./lib/types";
 import "./App.css";
-
-// ── Types ──────────────────────────────────────────────────────────
-
-interface Book {
-  id: string;
-  title: string;
-  file_path: string;
-  file_type: string;
-  imported_at: string;
-  current_chapter: number;
-  current_position: number;
-  total_chapters: number;
-}
-
-interface Chapter {
-  index: number;
-  title: string;
-  content: string;
-}
 
 // ── Constants ──────────────────────────────────────────────────────
 
@@ -69,23 +56,17 @@ function OverlayApp() {
         const pausedDuration = Date.now() - pausedAtRef.current;
         startTimeRef.current += pausedDuration;
       }
-      const baseDuration = (totalChars / 15) * 1000;
-      setEstimatedTotal(baseDuration);
+      setEstimatedTotal(estimateDurationMs(totalChars));
 
       progressTimer.current = setInterval(async () => {
         try {
-          const [current, total] = await invoke<[number, number]>(
-            "get_speech_position"
-          );
-          const pct = total > 0 ? Math.min((current / total) * 100, 100) : 0;
-          setProgress(pct);
+          // Progress is characters out of characters, straight from the
+          // backend. Nothing here uses `string.length` (UTF-16) or bytes.
+          const snapshot = await ipc.getPlaybackState();
+          setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
           setElapsed(Date.now() - startTimeRef.current);
-        } catch {
-          setElapsed(Date.now() - startTimeRef.current);
-          const est = baseDuration;
-          setProgress(
-            Math.min(((Date.now() - startTimeRef.current) / est) * 100, 99)
-          );
+        } catch (err) {
+          console.error("progress read failed:", err);
         }
       }, 100);
     },
@@ -105,7 +86,7 @@ function OverlayApp() {
             setProgress(0);
             setElapsed(0);
             try {
-              await invoke("speak_text", { text: t });
+              await ipc.speakText(t);
               startProgressPolling(t.length);
             } catch (err) {
               if (isErrorCode(err, ERROR_CODES.busy)) {
@@ -138,7 +119,7 @@ function OverlayApp() {
 
   const togglePause = async () => {
     try {
-      const paused = await invoke<boolean>("pause_resume_tts");
+      const paused = await ipc.pauseResume();
       setIsPaused(paused);
       if (paused) {
         pausedAtRef.current = Date.now();
@@ -155,7 +136,7 @@ function OverlayApp() {
     const next = (speedIdx + 1) % SPEEDS.length;
     setSpeedIdx(next);
     try {
-      await invoke("set_tts_rate", { rate: SPEEDS[next] });
+      await ipc.setRate(SPEEDS[next]);
     } catch (err) {
       console.error("set_tts_rate error:", err);
     }
@@ -240,7 +221,7 @@ function MainApp() {
 
   const refreshLibrary = useCallback(async () => {
     try {
-      const books = await invoke<Book[]>("cmd_get_library");
+      const books = await ipc.getLibrary();
       setLibrary(books);
     } catch (err) {
       console.error("Failed to load library:", err);
@@ -251,7 +232,7 @@ function MainApp() {
     let cancelled = false;
     const load = async () => {
       try {
-        const books = await invoke<Book[]>("cmd_get_library");
+        const books = await ipc.getLibrary();
         if (!cancelled) setLibrary(books);
       } catch (err) {
         console.error("Failed to load library:", err);
@@ -280,37 +261,33 @@ function MainApp() {
         const pausedDuration = Date.now() - pausedAtRef.current;
         startTimeRef.current += pausedDuration;
       }
-      const baseDuration = (totalChars / 15) * 1000;
-      setEstimatedTotal(baseDuration);
+      setEstimatedTotal(estimateDurationMs(totalChars));
 
       progressTimer.current = setInterval(async () => {
         try {
-          const [current, total, modeStr, isChunkDone] = await invoke<
-            [number, number, string, boolean]
-          >("get_speech_position");
-          const pct = total > 0 ? Math.min((current / total) * 100, 100) : 0;
-          setProgress(pct);
+          // Characters out of characters. The source is a discriminated union,
+          // so nothing has to be parsed out of a `"book:<id>:<chapter>"`
+          // string to recover identity.
+          const snapshot: PlaybackSnapshot = await ipc.getPlaybackState();
+          setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
           setElapsed(Date.now() - startTimeRef.current);
 
-          // Auto-advance: if playing a book and all chunks are done
+          // Auto-advance: a book chapter that has finished speaking.
           if (
-            isChunkDone &&
-            modeStr.startsWith("book:") &&
+            snapshot.finished &&
+            snapshot.source?.kind === "book" &&
             autoAdvanceRef.current
           ) {
             autoAdvanceRef.current = false;
             stopProgressPolling();
-            // Trigger auto-advance via event
             window.dispatchEvent(
-              new CustomEvent("auto-advance-chapter", { detail: modeStr })
+              new CustomEvent("auto-advance-chapter", {
+                detail: snapshot.source,
+              })
             );
           }
-        } catch {
-          setElapsed(Date.now() - startTimeRef.current);
-          const est = baseDuration;
-          setProgress(
-            Math.min(((Date.now() - startTimeRef.current) / est) * 100, 99)
-          );
+        } catch (err) {
+          console.error("progress read failed:", err);
         }
       }, 100);
     },
@@ -320,12 +297,9 @@ function MainApp() {
   // Listen for auto-advance events
   useEffect(() => {
     const handler = async (e: Event) => {
-      const modeStr = (e as CustomEvent).detail as string;
-      // Parse "book:<id>:<chapter>"
-      const parts = modeStr.split(":");
-      if (parts.length < 3) return;
-      const bookId = parts[1];
-      const chapterIdx = parseInt(parts[2], 10);
+      const source = (e as CustomEvent).detail as PlaybackSource;
+      if (source?.kind !== "book") return;
+      const { book_id: bookId, chapter_index: chapterIdx } = source;
       const nextIdx = chapterIdx + 1;
 
       if (!selectedBook || selectedBook.id !== bookId) return;
@@ -341,7 +315,7 @@ function MainApp() {
       setElapsed(0);
 
       try {
-        await invoke("cmd_save_reading_position", {
+        await ipc.saveReadingPosition({
           bookId,
           chapter: nextIdx,
           position: 0,
@@ -354,7 +328,7 @@ function MainApp() {
       const nextChapter = chapters.find((c) => c.index === nextIdx);
       if (nextChapter) {
         try {
-          await invoke("speak_book_chapter", {
+          await ipc.speakBookChapter({
             text: nextChapter.content,
             bookId,
             chapterIndex: nextIdx,
@@ -388,7 +362,7 @@ function MainApp() {
 
   const handleImport = async (filePath: string) => {
     try {
-      await invoke("cmd_import_book", { filePath });
+      await ipc.importBook(filePath);
       await refreshLibrary();
       showToast("Book imported!");
     } catch (err) {
@@ -399,7 +373,7 @@ function MainApp() {
 
   const handleOpenFileDialog = async () => {
     try {
-      const path = await invoke<string | null>("cmd_open_file_dialog");
+      const path = await ipc.openFileDialog();
       if (path) await handleImport(path);
     } catch (err) {
       console.error("File dialog error:", err);
@@ -408,7 +382,7 @@ function MainApp() {
 
   const handleDeleteBook = async (bookId: string) => {
     try {
-      await invoke("cmd_delete_book", { bookId });
+      await ipc.deleteBook(bookId);
       await refreshLibrary();
       showToast("Book deleted");
     } catch (err) {
@@ -418,9 +392,7 @@ function MainApp() {
 
   const handleOpenBook = async (book: Book) => {
     try {
-      const chs = await invoke<Chapter[]>("cmd_get_book_chapters", {
-        bookId: book.id,
-      });
+      const chs = await ipc.getBookChapters(book.id);
       setSelectedBook(book);
       setChapters(chs);
       setCurrentChapterIdx(book.current_chapter);
@@ -437,13 +409,13 @@ function MainApp() {
     stopProgressPolling();
     autoAdvanceRef.current = false;
     try {
-      await invoke("stop_tts");
+      await ipc.stop();
     } catch (err) {
       console.warn("stop_tts failed:", err);
     }
     if (selectedBook) {
       try {
-        await invoke("cmd_save_reading_position", {
+        await ipc.saveReadingPosition({
           bookId: selectedBook.id,
           chapter: currentChapterIdx,
           position: 0,
@@ -465,7 +437,7 @@ function MainApp() {
 
     // Stop any current playback first
     try {
-      await invoke("stop_tts");
+      await ipc.stop();
     } catch (err) {
       console.warn("stop_tts failed:", err);
     }
@@ -475,7 +447,7 @@ function MainApp() {
     setElapsed(0);
 
     try {
-      await invoke("speak_book_chapter", {
+      await ipc.speakBookChapter({
         text: chapter.content,
         bookId: selectedBook.id,
         chapterIndex: currentChapterIdx,
@@ -491,7 +463,7 @@ function MainApp() {
 
   const handlePauseResume = async () => {
     try {
-      const paused = await invoke<boolean>("pause_resume_tts");
+      const paused = await ipc.pauseResume();
       setIsPaused(paused);
       if (paused) {
         pausedAtRef.current = Date.now();
@@ -511,7 +483,7 @@ function MainApp() {
     const next = (speedIdx + 1) % SPEEDS.length;
     setSpeedIdx(next);
     try {
-      await invoke("set_tts_rate", { rate: SPEEDS[next] });
+      await ipc.setRate(SPEEDS[next]);
     } catch (err) {
       console.error("set_tts_rate error:", err);
     }
@@ -521,7 +493,7 @@ function MainApp() {
     stopProgressPolling();
     autoAdvanceRef.current = false;
     try {
-      await invoke("stop_tts");
+      await ipc.stop();
     } catch (err) {
       console.warn("stop_tts failed:", err);
     }
@@ -531,7 +503,7 @@ function MainApp() {
     setCurrentChapterIdx(newIdx);
     if (selectedBook) {
       try {
-        await invoke("cmd_save_reading_position", {
+        await ipc.saveReadingPosition({
           bookId: selectedBook.id,
           chapter: newIdx,
           position: 0,

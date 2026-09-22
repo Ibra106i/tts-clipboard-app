@@ -2,8 +2,7 @@
 //!
 //! These are thin, platform-agnostic adapters: they validate nothing, own
 //! nothing, and forward to the actor. Every one of them is either a pure read
-//! (`playback_get_state`, `get_speech_position`) or an explicit request to
-//! change playback.
+//! (`playback_get_state`) or an explicit request to change playback.
 
 use crate::error::AppResult;
 use crate::playback::actor::PlaybackHandle;
@@ -64,40 +63,16 @@ pub fn stop_tts(playback: State<'_, PlaybackHandle>) -> AppResult<()> {
 }
 
 /// Current playback state. Purely observational.
+///
+/// This is the single playback read command. Progress is expressed as
+/// `spoken_chars` out of `total_chars`, both in Unicode characters, so the UI
+/// never has to reconcile bytes, UTF-16 code units and engine offsets.
+///
+/// The previous `get_speech_position` returned a tuple whose `mode` field
+/// packed a book id and chapter into a string and whose reader advanced the
+/// chunk cursor as a side effect. Both are gone; the discriminated `source`
+/// carries the same information without parsing, and reading cannot mutate.
 #[tauri::command]
 pub fn playback_get_state(playback: State<'_, PlaybackHandle>) -> AppResult<PlaybackSnapshot> {
     playback.snapshot()
-}
-
-/// Legacy tuple shape kept for the existing frontend:
-/// `(spoken_chars, total_chars, mode, finished)`.
-///
-/// Both counts are **characters**. The `mode` string exists only so the current
-/// overlay can tell a chapter job from a clipboard job; it is derived from the
-/// snapshot rather than encoded in playback state.
-///
-/// This is an observational read and nothing else. It previously advanced the
-/// current chunk as a side effect, which made the frontend's poll part of the
-/// playback control flow; that responsibility now belongs exclusively to the
-/// actor's own tick.
-#[tauri::command]
-pub fn get_speech_position(
-    playback: State<'_, PlaybackHandle>,
-) -> AppResult<(u32, u32, String, bool)> {
-    let snapshot = playback.snapshot()?;
-    let mode = match &snapshot.source {
-        None => "idle".to_string(),
-        Some(PlaybackSource::Clipboard) => "clipboard".to_string(),
-        Some(PlaybackSource::Book {
-            book_id,
-            chapter_index,
-            ..
-        }) => format!("book:{book_id}:{chapter_index}"),
-    };
-    Ok((
-        snapshot.spoken_chars,
-        snapshot.total_chars,
-        mode,
-        snapshot.finished,
-    ))
 }
