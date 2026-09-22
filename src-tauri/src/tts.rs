@@ -46,23 +46,48 @@ pub fn init_com() {
     }
 }
 
-pub fn init_voice() -> windows::core::Result<ISpVoice> {
+fn create_voice() -> AppResult<ISpVoice> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)?;
+        let voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL).map_err(|e| {
+            AppError::playback(format!("the speech voice could not be created ({e})"))
+        })?;
 
-        // Try to prefer a OneCore voice over the default SAPI voice
+        // Prefer a OneCore voice over the legacy default when one exists.
         match try_select_onecore_voice(&voice) {
-            Ok(()) => {
-                log::info!("[tts] Using OneCore voice");
-            }
-            Err(e) => {
-                log::error!("[tts] OneCore voice unavailable, using default: {e}");
-            }
+            Ok(()) => log::info!("using a OneCore speech voice"),
+            Err(e) => log::warn!("OneCore voice unavailable, using the default voice: {e}"),
         }
 
         Ok(voice)
     }
+}
+
+/// Create the speech voice and store it in `state`.
+///
+/// Callers never touch the voice mutex themselves; all locking stays inside this
+/// module so a poisoned mutex can never be unwrapped in a panic from elsewhere.
+pub fn init_voice(state: &State<'_, TtsState>) -> AppResult<()> {
+    let voice = create_voice()?;
+    let mut guard = state
+        .inner()
+        .voice
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    *guard = Some(voice);
+    log::info!("speech voice initialized");
+    Ok(())
+}
+
+/// True when nothing is playing. The hotkey handler asks this instead of
+/// inspecting playback state directly.
+pub fn is_idle(state: &State<'_, TtsState>) -> AppResult<bool> {
+    let mode = state
+        .inner()
+        .mode
+        .lock()
+        .map_err(|e| AppError::internal(format!("playback lock poisoned: {e}")))?;
+    Ok(*mode == TtsMode::Idle)
 }
 
 fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {

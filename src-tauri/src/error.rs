@@ -25,6 +25,12 @@ pub enum AppError {
     #[error("{reason}")]
     InvalidInput { reason: String },
 
+    /// A Windows-only capability was requested on another platform. The variant
+    /// only exists where it can occur, so Windows builds stay free of dead code.
+    #[cfg(not(windows))]
+    #[error("{feature} is only available on Windows")]
+    UnsupportedPlatform { feature: String },
+
     /// Importing a file failed (copy, size limit, duplicate, ...).
     #[error("Could not import {file}: {reason}")]
     Import { file: String, reason: String },
@@ -57,6 +63,8 @@ impl AppError {
         match self {
             Self::NotFound { .. } => "not_found",
             Self::InvalidInput { .. } => "invalid_input",
+            #[cfg(not(windows))]
+            Self::UnsupportedPlatform { .. } => "unsupported_platform",
             Self::Import { .. } => "import_failed",
             Self::Document { .. } => "document_parse_failed",
             Self::Storage { .. } => "storage_failed",
@@ -72,6 +80,10 @@ impl AppError {
         match self {
             Self::NotFound { what, id } => format!("{what} not found: {id}"),
             Self::InvalidInput { reason } => reason.clone(),
+            #[cfg(not(windows))]
+            Self::UnsupportedPlatform { feature } => {
+                format!("{feature} is only available on Windows")
+            }
             Self::Import { file, reason } => format!("Could not import {file}: {reason}"),
             Self::Document { file, detail } => format!("Could not read {file}: {detail}"),
             Self::Storage { operation, detail } => {
@@ -111,6 +123,13 @@ impl AppError {
     pub fn invalid_input(reason: impl Into<String>) -> Self {
         Self::InvalidInput {
             reason: reason.into(),
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn unsupported_platform(feature: impl Into<String>) -> Self {
+        Self::UnsupportedPlatform {
+            feature: feature.into(),
         }
     }
 
@@ -192,6 +211,8 @@ mod tests {
         let errors = [
             AppError::not_found("Book", "abc"),
             AppError::invalid_input("Only PDF and EPUB files are supported"),
+            #[cfg(not(windows))]
+            AppError::unsupported_platform("Text to speech"),
             AppError::import("novel.epub", "file too large"),
             AppError::document("novel.pdf", "no extractable text"),
             AppError::storage("write", "disk full"),
@@ -204,6 +225,8 @@ mod tests {
         let expected = [
             "not_found",
             "invalid_input",
+            #[cfg(not(windows))]
+            "unsupported_platform",
             "import_failed",
             "document_parse_failed",
             "storage_failed",

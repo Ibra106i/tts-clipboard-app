@@ -2,6 +2,13 @@ mod error;
 mod library;
 mod models;
 mod parser;
+
+// The playback module is the only Windows-specific part of the crate. On other
+// platforms a stub with the same surface reports `unsupported_platform`.
+#[cfg(windows)]
+mod tts;
+#[cfg(not(windows))]
+#[path = "tts_stub.rs"]
 mod tts;
 
 use crate::error::{AppError, AppResult};
@@ -62,18 +69,13 @@ pub fn run() {
                 Err(e) => log::warn!("log directory unavailable: {e}"),
             }
 
-            // Initialize TTS voice
+            // Initialize the speech voice. All locking happens inside the
+            // playback module, so this never touches its internals and never
+            // panics on a poisoned mutex.
             {
                 let state = app.handle().state::<tts::TtsState>();
-                match tts::init_voice() {
-                    Ok(voice) => {
-                        let mut guard = state.inner().voice.lock().unwrap();
-                        *guard = Some(voice);
-                        log::info!("TTS voice initialized");
-                    }
-                    Err(e) => {
-                        log::error!("Failed to initialize TTS voice: {e}");
-                    }
+                if let Err(error) = tts::init_voice(&state) {
+                    log::error!("Speech voice unavailable: {error}");
                 }
             }
 
@@ -252,12 +254,7 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
     // Check if TTS is busy
     {
         let state = app.state::<tts::TtsState>();
-        let mode = state
-            .inner()
-            .mode
-            .lock()
-            .map_err(|e| AppError::internal(format!("playback state lock: {e}")))?;
-        if *mode != tts::TtsMode::Idle {
+        if !tts::is_idle(&state)? {
             let _ = app.emit("tts-busy", ());
             return Ok(());
         }
@@ -346,9 +343,7 @@ fn open_log_folder(app: &tauri::AppHandle) -> AppResult<()> {
 
 #[cfg(not(windows))]
 fn open_log_folder(_app: &tauri::AppHandle) -> AppResult<()> {
-    Err(AppError::internal(
-        "opening the log folder is only implemented on Windows",
-    ))
+    Err(AppError::unsupported_platform("Opening the log folder"))
 }
 
 #[tauri::command]

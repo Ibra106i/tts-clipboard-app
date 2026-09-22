@@ -32,10 +32,15 @@ epub = "2"
 scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-windows = { version = "0.58", features = [
+
+# SAPI 5 lives behind the Windows target so the crate still checks on other
+# platforms (where `tts_stub.rs` reports an explicit unsupported-platform error
+# instead of failing at link time). The version tracks the one Tauri already
+# pulls in transitively, so only a single copy of the windows bindings is built.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
     "Win32_Media_Speech",
     "Win32_System_Com",
-    "Win32_UI_Shell",
 ] }
 
 # Lints live here rather than in CI flags so `cargo clippy` locally enforces the
