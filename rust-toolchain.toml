@@ -1,0 +1,7 @@
+[toolchain]
+# The Windows build targets x86_64-pc-windows-msvc and needs the MSVC linker plus
+# the Windows SDK. `cargo clippy` / `cargo fmt` are part of the verification
+# gate, so they are pinned here rather than hoped for on the developer machine.
+channel = "stable-x86_64-pc-windows-msvc"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

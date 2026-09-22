@@ -43,9 +43,8 @@ pub fn extract_epub_text(file_path: &str) -> Result<Vec<Chapter>, String> {
             Some(id) => id.clone(),
             None => continue,
         };
-        let data = match archive.get_resource(&res_id) {
-            Some((bytes, _mime)) => bytes,
-            None => continue,
+        let Some((data, _mime)) = archive.get_resource(&res_id) else {
+            continue;
         };
 
         let html = String::from_utf8_lossy(&data).to_string();
@@ -174,7 +173,20 @@ fn extract_epub_html_filtered(html: &str) -> String {
 
 fn extract_text_filtered(element: scraper::ElementRef) -> String {
     let mut result = String::new();
-    let block_tags = ["p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "pre", "br"];
+    let block_tags = [
+        "p",
+        "div",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "blockquote",
+        "pre",
+        "br",
+    ];
 
     for child in element.children() {
         match child.value() {

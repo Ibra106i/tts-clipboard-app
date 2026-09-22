@@ -81,4 +81,3 @@ mod tests {
         assert!(book.chapters.is_none());
     }
 }
-   

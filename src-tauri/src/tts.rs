@@ -69,8 +69,9 @@ fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
         let category: ISpObjectTokenCategory =
             CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
 
-        let onecore_path =
-            windows::core::HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices");
+        let onecore_path = windows::core::HSTRING::from(
+            "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech_OneCore\\Voices",
+        );
         category.SetId(&onecore_path, false)?;
 
         let enumerator = category.EnumTokens(None, None)?;
@@ -78,7 +79,7 @@ fn try_select_onecore_voice(voice: &ISpVoice) -> windows::core::Result<()> {
         let mut token: Option<ISpObjectToken> = None;
         enumerator.Next(1, &mut token, None)?;
 
-        let token = token.ok_or_else(|| windows::core::Error::from_win32())?;
+        let token = token.ok_or_else(windows::core::Error::from_win32)?;
         voice.SetVoice(&token)?;
 
         Ok(())
@@ -119,7 +120,7 @@ fn chunk_text(text: &str) -> Vec<String> {
         }
 
         let cut_at = remaining[..CHUNK_SIZE]
-            .rfind(|c: char| c == '.' || c == '!' || c == '?')
+            .rfind(['.', '!', '?'])
             .map(|i| i + 1)
             .unwrap_or_else(|| remaining[..CHUNK_SIZE].rfind(' ').unwrap_or(CHUNK_SIZE));
 
@@ -159,7 +160,10 @@ pub fn get_total_chars(state: &TtsState) -> usize {
 
 pub fn get_chars_before_current_chunk(state: &TtsState) -> u32 {
     let chunks = state.chunks.lock().unwrap_or_else(|e| e.into_inner());
-    let idx = state.current_chunk.lock().unwrap_or_else(|e| e.into_inner());
+    let idx = state
+        .current_chunk
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     chunks.iter().take(*idx).map(|c| c.len() as u32).sum()
 }
 
@@ -186,11 +190,19 @@ pub fn speak_text(text: String, state: State<'_, TtsState>) -> Result<(), String
         *state_chunks = chunks;
     }
     {
-        let mut idx = state.inner().current_chunk.lock().map_err(|e| e.to_string())?;
+        let mut idx = state
+            .inner()
+            .current_chunk
+            .lock()
+            .map_err(|e| e.to_string())?;
         *idx = 0;
     }
     {
-        let mut spoken = state.inner().total_chars_spoken.lock().map_err(|e| e.to_string())?;
+        let mut spoken = state
+            .inner()
+            .total_chars_spoken
+            .lock()
+            .map_err(|e| e.to_string())?;
         *spoken = 0;
     }
 
@@ -219,16 +231,28 @@ pub fn speak_book_chapter(
         match &previous_mode {
             TtsMode::Idle => {}
             TtsMode::PlayingClipboard => {
-                payload.insert("previous_mode".to_string(), serde_json::Value::String("clipboard".to_string()));
+                payload.insert(
+                    "previous_mode".to_string(),
+                    serde_json::Value::String("clipboard".to_string()),
+                );
             }
             TtsMode::PlayingBook {
                 book_id,
                 chapter_index,
                 ..
             } => {
-                payload.insert("previous_mode".to_string(), serde_json::Value::String("book".to_string()));
-                payload.insert("book_id".to_string(), serde_json::Value::String(book_id.clone()));
-                payload.insert("chapter_index".to_string(), serde_json::Value::Number((*chapter_index).into()));
+                payload.insert(
+                    "previous_mode".to_string(),
+                    serde_json::Value::String("book".to_string()),
+                );
+                payload.insert(
+                    "book_id".to_string(),
+                    serde_json::Value::String(book_id.clone()),
+                );
+                payload.insert(
+                    "chapter_index".to_string(),
+                    serde_json::Value::Number((*chapter_index).into()),
+                );
             }
         }
         let _ = app.emit("tts-interrupted", serde_json::Value::Object(payload));
@@ -238,7 +262,13 @@ pub fn speak_book_chapter(
     {
         let voice_guard = state.inner().voice.lock().map_err(|e| e.to_string())?;
         if let Some(voice) = voice_guard.as_ref() {
-            unsafe { let _ = voice.Speak(&windows::core::HSTRING::default(), 0, Some(std::ptr::null_mut())); }
+            unsafe {
+                let _ = voice.Speak(
+                    &windows::core::HSTRING::default(),
+                    0,
+                    Some(std::ptr::null_mut()),
+                );
+            }
         }
     }
 
@@ -258,11 +288,19 @@ pub fn speak_book_chapter(
         *state_chunks = chunks;
     }
     {
-        let mut idx = state.inner().current_chunk.lock().map_err(|e| e.to_string())?;
+        let mut idx = state
+            .inner()
+            .current_chunk
+            .lock()
+            .map_err(|e| e.to_string())?;
         *idx = 0;
     }
     {
-        let mut spoken = state.inner().total_chars_spoken.lock().map_err(|e| e.to_string())?;
+        let mut spoken = state
+            .inner()
+            .total_chars_spoken
+            .lock()
+            .map_err(|e| e.to_string())?;
         *spoken = 0;
     }
 
@@ -400,10 +438,18 @@ mod tests {
 
     #[test]
     fn long_ascii_text_is_split_without_losing_content() {
-        let long = format!("{} {}", "First sentence. ".repeat(200), "Second. ".repeat(200));
+        let long = format!(
+            "{} {}",
+            "First sentence. ".repeat(200),
+            "Second. ".repeat(200)
+        );
         let chunks = chunk_text(&long);
 
-        assert!(chunks.len() > 1, "expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "expected multiple chunks, got {}",
+            chunks.len()
+        );
         assert_eq!(non_whitespace(&chunks.concat()), non_whitespace(&long));
     }
 }

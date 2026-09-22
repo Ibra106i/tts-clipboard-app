@@ -87,7 +87,8 @@ pub fn run() {
                 .always_on_top(true)
                 .transparent(true)
                 .visible(false)
-                .build() {
+                .build()
+                {
                     Ok(_) => {}
                     Err(e) => {
                         log::error!("Failed to create overlay window: {e}");
@@ -99,16 +100,18 @@ pub fn run() {
             {
                 let handle = app.handle().clone();
                 let shortcut = app.global_shortcut();
-                if let Err(e) = shortcut.on_shortcut("Ctrl+Shift+Space", move |_app, _shortcut, event| {
-                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        let h = handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(e) = handle_hotkey(&h).await {
-                                log::error!("Hotkey handler error: {e}");
-                            }
-                        });
-                    }
-                }) {
+                if let Err(e) =
+                    shortcut.on_shortcut("Ctrl+Shift+Space", move |_app, _shortcut, event| {
+                        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            let h = handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(e) = handle_hotkey(&h).await {
+                                    log::error!("Hotkey handler error: {e}");
+                                }
+                            });
+                        }
+                    })
+                {
                     log::error!("Failed to register global shortcut: {e}");
                 }
             }
@@ -134,7 +137,8 @@ pub fn run() {
                 let menu = match MenuBuilder::new(app)
                     .item(&show_item)
                     .item(&quit_item)
-                    .build() {
+                    .build()
+                {
                     Ok(m) => m,
                     Err(e) => {
                         log::error!("Failed to create tray menu: {e}");
@@ -147,19 +151,17 @@ pub fn run() {
                 if let Some(tray) = tray {
                     let _ = tray.set_menu(Some(menu));
                     let _ = tray.set_tooltip(Some("TTS Library"));
-                    tray.on_menu_event(move |_app, event| {
-                        match event.id().as_ref() {
-                            "show" => {
-                                if let Some(window) = handle.get_webview_window(MAIN_LABEL) {
-                                    let _ = window.show();
-                                    let _ = window.set_focus();
-                                }
+                    tray.on_menu_event(move |_app, event| match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = handle.get_webview_window(MAIN_LABEL) {
+                                let _ = window.show();
+                                let _ = window.set_focus();
                             }
-                            "quit" => {
-                                handle.exit(0);
-                            }
-                            _ => {}
                         }
+                        "quit" => {
+                            handle.exit(0);
+                        }
+                        _ => {}
                     });
                 }
             }
@@ -221,7 +223,7 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> Result<(), String> {
         let truncated: String = text.chars().take(MAX_CLIPBOARD_LEN).collect();
         format!("{truncated}... (text truncated)")
     } else {
-        text.clone()
+        text
     };
 
     let timestamp = SystemTime::now()
@@ -267,10 +269,7 @@ async fn cmd_open_file_dialog(app: tauri::AppHandle) -> Result<Option<String>, S
 }
 
 #[tauri::command]
-async fn cmd_import_book(
-    file_path: String,
-    app: tauri::AppHandle,
-) -> Result<models::Book, String> {
+async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> Result<models::Book, String> {
     library::import_book(file_path, &app)
 }
 

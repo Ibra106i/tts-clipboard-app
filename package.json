@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc -b",
-    "lint": "oxlint",
+    "lint": "oxlint --deny-warnings",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

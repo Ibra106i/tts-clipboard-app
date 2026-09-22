@@ -247,8 +247,20 @@ function MainApp() {
   }, []);
 
   useEffect(() => {
-    refreshLibrary();
-  }, [refreshLibrary]);
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const books = await invoke<Book[]>("cmd_get_library");
+        if (!cancelled) setLibrary(books);
+      } catch (err) {
+        console.error("Failed to load library:", err);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const stopProgressPolling = useCallback(() => {
     if (progressTimer.current) {
@@ -333,7 +345,9 @@ function MainApp() {
           chapter: nextIdx,
           position: 0,
         });
-      } catch {}
+      } catch (err) {
+        console.warn("save reading position failed:", err);
+      }
 
       // Speak the next chapter
       const nextChapter = chapters.find((c) => c.index === nextIdx);
@@ -423,7 +437,9 @@ function MainApp() {
     autoAdvanceRef.current = false;
     try {
       await invoke("stop_tts");
-    } catch {}
+    } catch (err) {
+      console.warn("stop_tts failed:", err);
+    }
     if (selectedBook) {
       try {
         await invoke("cmd_save_reading_position", {
@@ -431,7 +447,9 @@ function MainApp() {
           chapter: currentChapterIdx,
           position: 0,
         });
-      } catch {}
+      } catch (err) {
+        console.warn("save reading position failed:", err);
+      }
     }
     setView("library");
     setSelectedBook(null);
@@ -447,7 +465,9 @@ function MainApp() {
     // Stop any current playback first
     try {
       await invoke("stop_tts");
-    } catch {}
+    } catch (err) {
+      console.warn("stop_tts failed:", err);
+    }
 
     setIsPaused(false);
     setProgress(0);
@@ -501,7 +521,9 @@ function MainApp() {
     autoAdvanceRef.current = false;
     try {
       await invoke("stop_tts");
-    } catch {}
+    } catch (err) {
+      console.warn("stop_tts failed:", err);
+    }
     setIsPaused(false);
     setProgress(0);
     setElapsed(0);
@@ -513,7 +535,9 @@ function MainApp() {
           chapter: newIdx,
           position: 0,
         });
-      } catch {}
+      } catch (err) {
+        console.warn("save reading position failed:", err);
+      }
     }
   };
 
@@ -715,16 +739,16 @@ function MainApp() {
 // ── Root Router ────────────────────────────────────────────────────
 
 function App() {
-  const [windowLabel, setWindowLabel] = useState<string>("");
-
-  useEffect(() => {
+  // The window label is fixed for the lifetime of the webview, so it is
+  // derived once during the first render rather than pushed in through an
+  // effect (which would cause a cascading render on every mount).
+  const [windowLabel] = useState<string>(() => {
     try {
-      const label = getCurrentWindow().label;
-      setWindowLabel(label);
+      return getCurrentWindow().label;
     } catch {
-      setWindowLabel("main");
+      return "main";
     }
-  }, []);
+  });
 
   if (windowLabel === "overlay") {
     return <OverlayApp />;

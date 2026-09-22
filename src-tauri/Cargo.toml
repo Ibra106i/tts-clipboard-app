@@ -1,8 +1,8 @@
 [package]
 name = "app"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Offline read-aloud library and clipboard narrator"
+authors = ["Ibrahim"]
 license = ""
 repository = ""
 edition = "2021"
@@ -36,3 +36,18 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_UI_Shell",
 ] }
+
+# Lints live here rather than in CI flags so `cargo clippy` locally enforces the
+# same bar as the pipeline. `unsafe` is not forbidden (Win32 COM requires it),
+# but unsafe operations inside unsafe functions must be explicit, and no debug
+# or placeholder code may ship.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+non_ascii_idents = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+manual_let_else = "warn"
+redundant_clone = "warn"
