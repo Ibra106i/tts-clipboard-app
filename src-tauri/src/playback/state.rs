@@ -530,4 +530,39 @@ mod tests {
         assert_eq!(snapshot.title, "Clipboard");
         assert!(state.is_idle());
     }
+
+    /// Readers must never be writers. `snapshot`, `spoken_chars`,
+    /// `total_chars` and `chunk_count` all take `&self`, and this test pins
+    /// that guarantee: hammering the read API must leave the state, including
+    /// the chunk cursor, byte-for-byte where it was. The old
+    /// `get_speech_position` advanced chunks as a side effect, which made the
+    /// frontend poll part of the control flow.
+    #[test]
+    fn the_read_api_is_pure() {
+        let mut state = PlaybackState::new();
+        // Long enough to span several chunks, so the chunk cursor is observable.
+        state.start(clipboard_job(&"a".repeat(5000)));
+        assert!(state.chunk_count() > 1);
+        let _ = state.take_next_chunk();
+
+        let before = state.snapshot(0);
+        for offset in [0u32, 1, 7, 0, 10_000, 3] {
+            let _ = state.spoken_chars(offset);
+            let _ = state.total_chars();
+            let _ = state.chunk_count();
+            let _ = state.is_awaiting_engine();
+            let _ = state.is_idle();
+        }
+        // Many reads later, a read at the same offset is still identical.
+        let after = state.snapshot(0);
+        assert_eq!(after.spoken_chars, before.spoken_chars);
+        assert_eq!(after.finished, before.finished);
+        assert_eq!(after.status, before.status);
+
+        // The chunk cursor is still exactly where the writer left it.
+        assert!(
+            state.advance_chunk(),
+            "the next chunk is the one after read"
+        );
+    }
 }

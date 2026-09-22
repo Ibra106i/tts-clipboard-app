@@ -75,6 +75,11 @@ pub fn playback_get_state(playback: State<'_, PlaybackHandle>) -> AppResult<Play
 /// Both counts are **characters**. The `mode` string exists only so the current
 /// overlay can tell a chapter job from a clipboard job; it is derived from the
 /// snapshot rather than encoded in playback state.
+///
+/// This is an observational read and nothing else. It previously advanced the
+/// current chunk as a side effect, which made the frontend's poll part of the
+/// playback control flow; that responsibility now belongs exclusively to the
+/// actor's own tick.
 #[tauri::command]
 pub fn get_speech_position(
     playback: State<'_, PlaybackHandle>,
