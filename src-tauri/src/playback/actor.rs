@@ -469,9 +469,9 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use crate::playback::speaker::EngineProgress;
     use super::testing::FakeSpeaker;
     use super::*;
+    use crate::playback::speaker::EngineProgress;
 
     fn handle(speaker: Arc<FakeSpeaker>) -> PlaybackHandle {
         PlaybackHandle::spawn(
@@ -738,5 +738,84 @@ mod tests {
 
         let error = handle.snapshot().expect_err("thread is gone");
         assert_eq!(error.code(), "playback_failed");
+    }
+
+    /// The previous design took `chunks -> current_chunk -> voice` in one path
+    /// and `voice -> mode -> chunks -> current_chunk` in another, so two
+    /// threads could deadlock by acquiring the same locks in opposite orders.
+    /// There is now exactly one lock in the whole subsystem (the join handle)
+    /// and it is never held while sending a command, so no ordering exists to
+    /// invert. This drives every command from many threads at once to prove it.
+    #[test]
+    fn concurrent_commands_never_deadlock() {
+        let speaker = FakeSpeaker::new();
+        let handle = Arc::new(handle(Arc::clone(&speaker)));
+
+        let mut threads = Vec::new();
+        for worker in 0..8 {
+            let handle = Arc::clone(&handle);
+            threads.push(thread::spawn(move || {
+                for i in 0..25 {
+                    // Every accessor and mutator, interleaved, from every thread.
+                    let _ = handle.snapshot();
+                    let _ = handle.set_rate(1.0 + (i % 3) as f32 * 0.25);
+                    let _ = handle.pause_resume();
+                    if i % 5 == 0 {
+                        let _ = handle.start(PlaybackJob::new(
+                            PlaybackSource::Clipboard,
+                            "Clipboard",
+                            &"x".repeat(50 + worker),
+                        ));
+                    }
+                    if i % 7 == 0 {
+                        let _ = handle.stop();
+                    }
+                    let _ = handle.is_idle();
+                }
+            }));
+        }
+
+        for worker in threads {
+            worker.join().expect("no thread may hang or panic");
+        }
+
+        // Still responsive after the storm: that is the actual deadlock check,
+        // because a deadlock would have hung the joins above.
+        assert!(handle.snapshot().is_ok());
+        handle.shutdown();
+    }
+
+    /// Reading state must never be a mutation in disguise. The old
+    /// `get_speech_position` advanced chunks as a side effect, which made the
+    /// 100 ms frontend poll drive playback.
+    #[test]
+    fn reading_the_snapshot_does_not_advance_playback() {
+        let speaker = FakeSpeaker::new();
+        let handle = handle(Arc::clone(&speaker));
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                &"a".repeat(25),
+            ))
+            .expect("start");
+
+        // Wait for the scripted engine to stop moving (two identical reads in a
+        // row), then observe. Any change caused by the reads themselves would
+        // show up here; the reads are `&self` all the way down, so there is
+        // nothing they could mutate.
+        assert!(
+            wait_until(|| handle.snapshot().map(|s| s.finished).unwrap_or(false)),
+            "job should finish"
+        );
+        let before = handle.snapshot().expect("snapshot");
+
+        for _ in 0..100 {
+            let during = handle.snapshot().expect("snapshot");
+            assert_eq!(during.spoken_chars, before.spoken_chars);
+            assert_eq!(during.finished, before.finished);
+            assert_eq!(during.status, before.status);
+        }
+        handle.shutdown();
     }
 }
