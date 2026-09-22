@@ -17,9 +17,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::playback::speaker::{rate_to_engine, Speaker};
-use crate::playback::state::{
-    PlaybackJob, PlaybackSnapshot, PlaybackSource, PlaybackState, PlaybackStatus,
-};
+use crate::playback::state::{PlaybackJob, PlaybackSnapshot, PlaybackSource, PlaybackState};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -154,11 +152,6 @@ impl PlaybackHandle {
     pub fn snapshot(&self) -> AppResult<PlaybackSnapshot> {
         let (reply, rx) = channel();
         self.send(Command::Snapshot(reply), rx)
-    }
-
-    pub fn is_idle(&self) -> AppResult<bool> {
-        let snapshot = self.snapshot()?;
-        Ok(snapshot.status == PlaybackStatus::Idle && snapshot.source.is_none())
     }
 
     /// Ask the thread to finish and wait for it. Idempotent, and safe to call
@@ -472,6 +465,7 @@ mod tests {
     use super::testing::FakeSpeaker;
     use super::*;
     use crate::playback::speaker::EngineProgress;
+    use crate::playback::state::PlaybackStatus;
 
     fn handle(speaker: Arc<FakeSpeaker>) -> PlaybackHandle {
         PlaybackHandle::spawn(
@@ -479,6 +473,15 @@ mod tests {
             Arc::new(NoEvents),
         )
         .expect("actor starts")
+    }
+
+    /// Nothing is playing and nothing is queued. Derived from the snapshot, so
+    /// there is no second definition of "idle" to drift out of sync.
+    fn is_idle(handle: &PlaybackHandle) -> bool {
+        handle
+            .snapshot()
+            .map(|s| s.status == PlaybackStatus::Idle && s.source.is_none())
+            .unwrap_or(false)
     }
 
     fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
@@ -496,7 +499,7 @@ mod tests {
         let speaker = FakeSpeaker::new();
         let handle = handle(Arc::clone(&speaker));
 
-        assert!(handle.is_idle().expect("idle"));
+        assert!(is_idle(&handle));
         assert_eq!(handle.snapshot().expect("snapshot").total_chars, 0);
         handle.shutdown();
     }
@@ -605,7 +608,7 @@ mod tests {
             .expect("start");
         handle.stop().expect("stop");
 
-        assert!(handle.is_idle().expect("idle"));
+        assert!(is_idle(&handle));
         assert!(speaker.purges.load(std::sync::atomic::Ordering::SeqCst) >= 1);
         handle.shutdown();
     }
@@ -690,7 +693,7 @@ mod tests {
         assert_eq!(error.code(), "playback_failed");
 
         // The actor is still alive and has cleaned up after the failure.
-        assert!(handle.is_idle().expect("still responsive"));
+        assert!(is_idle(&handle));
         handle.shutdown();
     }
 
@@ -770,7 +773,7 @@ mod tests {
                     if i % 7 == 0 {
                         let _ = handle.stop();
                     }
-                    let _ = handle.is_idle();
+                    let _ = is_idle(&handle);
                 }
             }));
         }

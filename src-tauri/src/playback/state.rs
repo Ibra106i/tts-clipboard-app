@@ -564,8 +564,11 @@ mod tests {
         let after = state.snapshot(0);
         assert_eq!(after.spoken_chars, before.spoken_chars);
         assert_eq!(after.finished, before.finished);
-        assert_eq!(after.status, before.status);        // The chunk cursor is still exactly where the writer left it.
-        assert!(state.advance_chunk(), "the next chunk is the one after read");
+        assert_eq!(after.status, before.status); // The chunk cursor is still exactly where the writer left it.
+        assert!(
+            state.advance_chunk(),
+            "the next chunk is the one after read"
+        );
     }
 
     /// The frontend's typed IPC layer decodes these shapes. Pinning them here

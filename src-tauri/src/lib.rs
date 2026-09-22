@@ -7,14 +7,14 @@ mod text;
 
 use crate::error::{AppError, AppResult};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 const OVERLAY_LABEL: &str = "overlay";
 const MAIN_LABEL: &str = "main";
-const MAX_CLIPBOARD_LEN: usize = 5000;
+/// Longest clipboard payload that will be read aloud, in characters.
+const MAX_CLIPBOARD_CHARS: usize = 5000;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -252,15 +252,9 @@ pub fn run() {
 }
 
 async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
-    // Check if TTS is busy
-    {
-        let handle = app.state::<playback::PlaybackHandle>();
-        if !handle.is_idle()? {
-            let _ = app.emit("tts-busy", ());
-            return Ok(());
-        }
-    }
-
+    // No pre-flight busy check: `start` itself returns `Busy`, and asking
+    // twice was how a second, racing async task got launched in the first
+    // place. One decision point, one owner.
     let text = playback::read_clipboard()?;
 
     if text.trim().is_empty() {
@@ -276,38 +270,35 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
         text.chars().count()
     );
 
-    let display_text = if text.len() > MAX_CLIPBOARD_LEN {
-        let truncated: String = text.chars().take(MAX_CLIPBOARD_LEN).collect();
+    // Characters, not bytes, on both sides of the comparison: the limit is a
+    // reader-facing length, and the old byte comparison truncated non-ASCII
+    // text at a different point than it reported.
+    let display_text = if text.chars().count() > MAX_CLIPBOARD_CHARS {
+        let truncated: String = text.chars().take(MAX_CLIPBOARD_CHARS).collect();
         format!("{truncated}... (text truncated)")
     } else {
         text
     };
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or_default();
-
-    let _ = app.emit(
-        "speak-trigger",
-        serde_json::json!({
-            "text": display_text,
-            "timestamp": timestamp,
-        }),
-    );
-
-    if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-
+    // Exactly one owner starts playback: this handler. It used to start
+    // playback *and* emit a `speak-trigger` event that made the overlay call
+    // `speak_text` again, so one of the two calls always lost the race and the
+    // user saw a spurious "busy" toast with a progress bar that never moved.
+    // The overlay is now a pure view of the `playback-state` events the actor
+    // emits, and never initiates speech itself.
     let handle = app.state::<playback::PlaybackHandle>();
     match handle.start(playback::PlaybackJob::new(
         playback::PlaybackSource::Clipboard,
         "Clipboard",
         &display_text,
     )) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            Ok(())
+        }
         Err(error) if error.is_busy() => {
             let _ = app.emit("tts-busy", ());
             Ok(())

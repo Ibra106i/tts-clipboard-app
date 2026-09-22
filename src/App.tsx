@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { estimateDurationMs, formatTime, percentOf } from "./lib/format";
-import { ERROR_CODES, describeError, isErrorCode } from "./lib/errors";
+import { describeError } from "./lib/errors";
 import * as ipc from "./lib/ipc";
 import type {
   Book,
@@ -28,10 +28,12 @@ function OverlayApp() {
   const [toast, setToast] = useState("");
 
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startTimeRef = useRef<number>(0);
-  const pausedAtRef = useRef<number>(0);
-  const totalCharsRef = useRef<number>(0);
+  // Elapsed time is measured here, locally, and only while the backend says
+  // playback is actually running. It is a clock, not control flow: it never
+  // asks the backend anything and can never advance playback.
+  const [isPlaying, setIsPlaying] = useState(false);
+  const startedAtRef = useRef<number>(0);
+  const accumulatedRef = useRef<number>(0);
 
   const showToast = useCallback((msg: string, duration = 2000) => {
     setToast(msg);
@@ -39,65 +41,43 @@ function OverlayApp() {
     toastTimer.current = setTimeout(() => setToast(""), duration);
   }, []);
 
-  const stopProgressPolling = useCallback(() => {
-    if (progressTimer.current) {
-      clearInterval(progressTimer.current);
-      progressTimer.current = null;
-    }
-  }, []);
+  useEffect(() => {
+    if (!isPlaying || isPaused) return;
+    startedAtRef.current = Date.now();
+    const timer = setInterval(() => {
+      setElapsed(
+        accumulatedRef.current + (Date.now() - startedAtRef.current)
+      );
+    }, 250);
+    return () => {
+      clearInterval(timer);
+      accumulatedRef.current += Date.now() - startedAtRef.current;
+    };
+  }, [isPlaying, isPaused]);
 
-  const startProgressPolling = useCallback(
-    (totalChars: number, resume = false) => {
-      stopProgressPolling();
-      totalCharsRef.current = totalChars;
-      if (!resume) {
-        startTimeRef.current = Date.now();
-      } else {
-        const pausedDuration = Date.now() - pausedAtRef.current;
-        startTimeRef.current += pausedDuration;
-      }
-      setEstimatedTotal(estimateDurationMs(totalChars));
-
-      progressTimer.current = setInterval(async () => {
-        try {
-          // Progress is characters out of characters, straight from the
-          // backend. Nothing here uses `string.length` (UTF-16) or bytes.
-          const snapshot = await ipc.getPlaybackState();
-          setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
-          setElapsed(Date.now() - startTimeRef.current);
-        } catch (err) {
-          console.error("progress read failed:", err);
-        }
-      }, 100);
-    },
-    [stopProgressPolling]
-  );
-
+  // The overlay is a *view*. It never starts speech; the backend's hotkey
+  // handler is the single owner of the clipboard flow, and the actor's
+  // `playback-state` events are the only thing that drives this UI.
   useEffect(() => {
     const unlistens: (() => void)[] = [];
     const setup = async () => {
       unlistens.push(
-        await listen<{ text: string; timestamp: number }>(
-          "speak-trigger",
-          async (event) => {
-            const { text: t } = event.payload;
-            setText(t);
-            setIsPaused(false);
-            setProgress(0);
+        await listen<PlaybackSnapshot>("playback-state", (event) => {
+          const snapshot = event.payload;
+          setText(snapshot.text_preview);
+          setIsPaused(snapshot.status === "paused");
+          setProgress(percentOf(snapshot.spoken_chars, snapshot.total_chars));
+          setEstimatedTotal(
+            estimateDurationMs(snapshot.total_chars, snapshot.rate)
+          );
+
+          const isThisJob = snapshot.source?.kind === "clipboard";
+          setIsPlaying(isThisJob && snapshot.status === "playing");
+          if (!isThisJob || snapshot.finished) {
+            accumulatedRef.current = 0;
             setElapsed(0);
-            try {
-              await ipc.speakText(t);
-              startProgressPolling(t.length);
-            } catch (err) {
-              if (isErrorCode(err, ERROR_CODES.busy)) {
-                showToast("Finish current playback first");
-              } else {
-                showToast(describeError(err));
-              }
-              console.error("speak_text error:", err);
-            }
           }
-        )
+        })
       );
       unlistens.push(
         await listen("clipboard-empty", () => {
@@ -110,24 +90,18 @@ function OverlayApp() {
         })
       );
     };
-    setup();
+    void setup();
     return () => {
       unlistens.forEach((fn) => fn());
-      stopProgressPolling();
     };
-  }, [startProgressPolling, stopProgressPolling, showToast]);
+  }, [showToast]);
 
   const togglePause = async () => {
     try {
       const paused = await ipc.pauseResume();
       setIsPaused(paused);
-      if (paused) {
-        pausedAtRef.current = Date.now();
-        stopProgressPolling();
-      } else {
-        startProgressPolling(totalCharsRef.current, true);
-      }
     } catch (err) {
+      showToast(describeError(err));
       console.error("pause_resume error:", err);
     }
   };
@@ -138,20 +112,23 @@ function OverlayApp() {
     try {
       await ipc.setRate(SPEEDS[next]);
     } catch (err) {
+      showToast(describeError(err));
       console.error("set_tts_rate error:", err);
     }
   };
 
   const closeOverlay = async () => {
-    stopProgressPolling();
     try {
       await getCurrentWindow().hide();
     } catch (err) {
+      showToast(describeError(err));
       console.error("hide error:", err);
     }
   };
 
-  const displayText = text.length > 500 ? text.slice(0, 500) + "..." : text;
+  // The backend already truncates the preview in characters; slicing here by
+  // `string.length` would cut UTF-16 code units and split astral characters.
+  const displayText = text;
 
   return (
     <div className="overlay-root">
