@@ -13,6 +13,10 @@ pub struct Book {
     pub total_chapters: usize,
     #[serde(default)]
     pub chapters: Option<Vec<Chapter>>,
+    /// SHA-256 of the stored file; absent for books imported before this
+    /// field existed. Used to reject duplicate imports.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -47,6 +51,7 @@ mod tests {
                 title: "Chapter 1".to_string(),
                 content: "Body".to_string(),
             }]),
+            fingerprint: None,
         }
     }
 
