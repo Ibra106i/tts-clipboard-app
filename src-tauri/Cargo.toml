@@ -61,3 +61,14 @@ todo = "deny"
 undocumented_unsafe_blocks = "warn"
 manual_let_else = "warn"
 redundant_clone = "warn"
+
+# Release builds optimise for size (a desktop utility ships faster and starts
+# faster when small) while keeping enough debug info for profiling crashes.
+# LTO and one codegen unit trade build time for runtime quality, which is the
+# right trade for a released binary that is built rarely.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
