@@ -12,6 +12,14 @@ dist
 dist-ssr
 *.local
 
+# Rust build output and Tauri generated schemas
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Test coverage output
+coverage/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
