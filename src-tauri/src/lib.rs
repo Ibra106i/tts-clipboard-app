@@ -404,25 +404,30 @@ async fn cmd_open_logs_folder(app: tauri::AppHandle) -> AppResult<()> {
 async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
 
-    // The dialog API is callback-based; bridge it to async with a channel so
-    // this command no longer parks a runtime worker thread for the whole
-    // time the dialog is open (which used to stall every other command).
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog()
-        .file()
-        .add_filter("PDF & EPUB", &["pdf", "epub"])
-        .pick_file(move |path| {
-            let _ = tx.send(path);
-        });
+    // The dialog API is callback-based, so bridge it to async. The blocking
+    // wait runs on the blocking pool: waiting inline used to park an async
+    // worker thread for the whole time the dialog was open, stalling every
+    // other command (including playback polling).
+    tauri::async_runtime::spawn_blocking(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.dialog()
+            .file()
+            .add_filter("PDF & EPUB", &["pdf", "epub"])
+            .pick_file(move |path| {
+                let _ = tx.send(path);
+            });
 
-    let result: Option<tauri_plugin_dialog::FilePath> = rx
-        .recv()
-        .map_err(|_| AppError::internal("file dialog closed without a result"))?;
+        let result: Option<tauri_plugin_dialog::FilePath> = rx
+            .recv()
+            .map_err(|_| AppError::internal("file dialog closed without a result"))?;
 
-    match result {
-        Some(path) => Ok(Some(path.to_string())),
-        None => Ok(None),
-    }
+        match result {
+            Some(path) => Ok(Some(path.to_string())),
+            None => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("file dialog task aborted: {e}")))?
 }
 
 #[tauri::command]
