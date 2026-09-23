@@ -31,8 +31,23 @@ pub fn read_library_file(path: &Path) -> AppResult<Vec<Book>> {
 pub fn write_library_file(path: &Path, books: &[Book]) -> AppResult<()> {
     let data = serde_json::to_string_pretty(books)
         .map_err(|e| AppError::storage("serialize", e.to_string()))?;
-    fs::write(path, data)
-        .map_err(|e| AppError::storage("write", format!("{}: {e}", path.display())))
+
+    // Write-to-temp-then-rename. A plain fs::write truncates the file first,
+    // so a crash (or power loss) mid-write left the user's whole library
+    // catalogue as a zero-byte or half-written JSON file. The rename below
+    // is atomic on Windows and POSIX, so `library.json` is always either the
+    // previous complete state or the new one.
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, &data)
+        .map_err(|e| AppError::storage("write", format!("{}: {e}", temp_path.display())))?;
+    if let Err(e) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::storage(
+            "replace",
+            format!("{}: {e}", path.display()),
+        ));
+    }
+    Ok(())
 }
 
 /// Look up a book by id, or report a structured not-found error.
@@ -404,6 +419,22 @@ mod tests {
         assert_eq!(restored[0].id, "a");
         assert_eq!(restored[1].current_chapter, 3);
         assert_eq!(restored[1].total_chapters, 12);
+    }
+
+    #[test]
+    fn a_written_library_never_leaves_a_temp_file_behind() {
+        let dir = TempDir::new("atomic");
+        let path = dir.file("library.json");
+        write_library_file(&path, &[book("a")]).expect("write");
+
+        assert!(path.exists());
+        assert!(
+            !dir.file("library.json.tmp").exists(),
+            "the temp file must be renamed away"
+        );
+        // And the content is complete JSON, not a truncated write.
+        let restored = read_library_file(&path).expect("re-read");
+        assert_eq!(restored.len(), 1);
     }
 
     #[test]
