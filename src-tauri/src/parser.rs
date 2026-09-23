@@ -51,28 +51,45 @@ pub fn extract_epub_text(file_path: &str) -> AppResult<Vec<Chapter>> {
     let mut archive = epub::doc::EpubDoc::new(file_path)
         .map_err(|e| AppError::document(&label, format!("the EPUB could not be opened ({e})")))?;
 
-    let spine = archive.spine.clone();
+    // Walk the spine with the crate's own cursor instead of cloning the spine
+    // and re-resolving every id; this also skips navigation documents
+    // (properties="nav"), which used to be parsed into a garbage chapter.
     let mut chapters = Vec::new();
+    loop {
+        let properties = archive
+            .spine
+            .get(archive.get_current_chapter())
+            .and_then(|item| item.properties.clone())
+            .unwrap_or_default();
+        let is_nav = properties.split_whitespace().any(|p| p == "nav");
 
-    for (i, spine_item) in spine.iter().enumerate() {
-        let Some(res_id) = spine_item.id.clone() else {
-            continue;
-        };
-        let Some((data, _mime)) = archive.get_resource(&res_id) else {
-            continue;
-        };
+        if !is_nav {
+            if let Some((data, mime)) = archive.get_current() {
+                let mime = mime.to_ascii_lowercase();
+                // Only parse documents. Images, stylesheets and fonts were
+                // previously decoded as lossy UTF-8 and fed to the HTML
+                // stripper, producing noise chapters.
+                let looks_html = mime.contains("html")
+                    || mime.contains("xml")
+                    || data.starts_with(b"<?xml")
+                    || data.starts_with(b"<");
+                if looks_html {
+                    let html = String::from_utf8_lossy(&data).to_string();
+                    let text = extract_epub_html_filtered(&html);
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        chapters.push(Chapter {
+                            index: chapters.len(),
+                            title: format!("Chapter {}", chapters.len() + 1),
+                            content: trimmed,
+                        });
+                    }
+                }
+            }
+        }
 
-        let html = String::from_utf8_lossy(&data).to_string();
-        let text = extract_epub_html_filtered(&html);
-
-        let trimmed = text.trim().to_string();
-        if !trimmed.is_empty() {
-            let title = format!("Chapter {}", i + 1);
-            chapters.push(Chapter {
-                index: chapters.len(),
-                title,
-                content: trimmed,
-            });
+        if !archive.go_next() {
+            break;
         }
     }
 
@@ -123,21 +140,6 @@ fn is_excluded_element(element: scraper::ElementRef) -> bool {
         }
     }
 
-    false
-}
-
-fn is_descendant_of_excluded(element: scraper::ElementRef) -> bool {
-    let mut current = element.parent();
-    while let Some(parent) = current {
-        if let Some(parent_elem) = scraper::ElementRef::wrap(parent) {
-            if is_excluded_element(parent_elem) {
-                return true;
-            }
-            current = parent_elem.parent();
-        } else {
-            break;
-        }
-    }
     false
 }
 
@@ -217,7 +219,11 @@ fn extract_text_filtered(element: scraper::ElementRef) -> String {
             }
             scraper::Node::Element(elem) => {
                 if let Some(child_elem) = scraper::ElementRef::wrap(child) {
-                    if is_excluded_element(child_elem) || is_descendant_of_excluded(child_elem) {
+                    // No is_descendant_of_excluded check here: the recursion
+                    // only descends into non-excluded subtrees, so every
+                    // ancestor has already been proven clean. Re-walking the
+                    // ancestor chain per node made extraction O(n·depth).
+                    if is_excluded_element(child_elem) {
                         continue;
                     }
 
