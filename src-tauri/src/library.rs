@@ -79,6 +79,94 @@ fn write_library(app_handle: &tauri::AppHandle, books: &[Book]) -> AppResult<()>
 
 // ── Commands' backing functions ─────────────────────────────────────
 
+/// A file that has been copied into the library but not yet accepted.
+///
+/// Import used to copy the source into `books/` and then parse it, so every
+/// failed import (a corrupt PDF, an EPUB with no text, an unreadable file)
+/// left a stray copy behind that the user could not see or delete. A staged
+/// import now owns its temporary file and removes it unless it is committed.
+pub struct StagedImport {
+    temp_path: PathBuf,
+    final_path: PathBuf,
+    committed: bool,
+}
+
+impl StagedImport {
+    /// Copy `source` into `books_dir` under a temporary name.
+    pub fn begin(books_dir: &Path, source: &Path, id: &str, ext: &str) -> AppResult<Self> {
+        let file_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document")
+            .to_string();
+
+        let final_path = books_dir.join(format!("{id}.{ext}"));
+        let temp_path = books_dir.join(format!("{id}.{ext}.part"));
+
+        fs::copy(source, &temp_path).map_err(|e| {
+            AppError::import(&file_name, format!("the file could not be copied ({e})"))
+        })?;
+
+        Ok(Self {
+            temp_path,
+            final_path,
+            committed: false,
+        })
+    }
+
+    /// Path to parse. Always the private temporary copy, never the user's file.
+    pub fn path(&self) -> &Path {
+        &self.temp_path
+    }
+
+    /// Accept the import: the temporary file becomes the stored copy.
+    pub fn commit(mut self) -> AppResult<PathBuf> {
+        fs::rename(&self.temp_path, &self.final_path).map_err(|e| {
+            AppError::import(
+                self.final_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("document"),
+                format!("the imported copy could not be stored ({e})"),
+            )
+        })?;
+        self.committed = true;
+        Ok(self.final_path.clone())
+    }
+}
+
+impl Drop for StagedImport {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // Any failure between begin() and commit() lands here: the import is
+        // rolled back rather than leaving an orphan in books/.
+        if let Err(e) = fs::remove_file(&self.temp_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "could not remove the staged import {}: {e}",
+                    self.temp_path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Extract chapters from an already-copied file.
+fn chapters_for(path: &Path, ext: &str) -> AppResult<Vec<Chapter>> {
+    let path_str = path.to_str().ok_or_else(|| {
+        AppError::invalid_input("The path to this file is not valid UTF-8 on this system.")
+    })?;
+    match ext {
+        "pdf" => parser::extract_pdf_text(path_str),
+        "epub" => parser::extract_epub_text(path_str),
+        other => Err(AppError::invalid_input(format!(
+            "Unsupported file type .{other}. Only PDF and EPUB are supported."
+        ))),
+    }
+}
+
 pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> AppResult<Book> {
     let src = PathBuf::from(&file_path);
     if !src.exists() {
@@ -97,25 +185,13 @@ pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> AppResul
         ));
     }
 
-    let file_name = src
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("document")
-        .to_string();
-
     let dest_dir = books_dir(app_handle)?;
     let id = Uuid::new_v4().to_string();
-    let stored_name = format!("{}.{}", id, ext);
-    let dest = dest_dir.join(&stored_name);
-    fs::copy(&src, &dest)
-        .map_err(|e| AppError::import(&file_name, format!("the file could not be copied ({e})")))?;
 
-    let dest_str = dest.to_str().unwrap_or_default();
-    let chapters: Vec<Chapter> = match ext.as_str() {
-        "pdf" => parser::extract_pdf_text(dest_str)?,
-        "epub" => parser::extract_epub_text(dest_str)?,
-        _ => unreachable!("extension was validated above"),
-    };
+    // 1. Stage a private copy. 2. Parse it. 3. Only then keep it.
+    let staged = StagedImport::begin(&dest_dir, &src, &id, &ext)?;
+    let chapters = chapters_for(staged.path(), &ext)?;
+    let stored_path = staged.commit()?;
 
     let title = src
         .file_stem()
@@ -126,7 +202,7 @@ pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> AppResul
     let book = Book {
         id,
         title,
-        file_path: dest.to_string_lossy().to_string(),
+        file_path: stored_path.to_string_lossy().to_string(),
         file_type: ext,
         imported_at: Utc::now().naive_utc(),
         current_chapter: 0,
@@ -137,7 +213,16 @@ pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> AppResul
 
     let mut books = read_library(app_handle)?;
     books.push(book.clone());
-    write_library(app_handle, &books)?;
+    if let Err(error) = write_library(app_handle, &books) {
+        // The library could not record the book, so the copy must not survive:
+        // an unreferenced file is exactly the orphan this change removes.
+        if let Err(e) = fs::remove_file(&stored_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("could not roll back {}: {e}", stored_path.display());
+            }
+        }
+        return Err(error);
+    }
 
     Ok(book)
 }
@@ -294,6 +379,55 @@ mod tests {
             index_of(&books, "zz").expect_err("absent").code(),
             "not_found"
         );
+    }
+
+    fn temp_dir_for_import() -> TempDir {
+        TempDir::new("import")
+    }
+
+    #[test]
+    fn a_failed_import_leaves_no_copy_behind() {
+        let books = temp_dir_for_import();
+        let source_dir = TempDir::new("source");
+        // A file that exists but cannot be parsed: a PDF in name only.
+        let source = source_dir.file("broken.pdf");
+        fs::write(&source, b"this is not a PDF at all").expect("write fixture");
+
+        let staged = StagedImport::begin(&books.0, &source, "book-1", "pdf").expect("stage");
+        let parsed = chapters_for(staged.path(), "pdf");
+        assert!(parsed.is_err(), "the fixture must fail to parse");
+
+        // Dropping the staged import is what a failed parse does.
+        drop(staged);
+
+        let leftovers: Vec<_> = fs::read_dir(&books.0)
+            .expect("read books dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed import must not leave files behind, found {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn a_committed_import_keeps_exactly_one_file() {
+        let books = temp_dir_for_import();
+        let source_dir = TempDir::new("source");
+        let source = source_dir.file("book.epub");
+        fs::write(&source, b"placeholder").expect("write fixture");
+
+        let staged = StagedImport::begin(&books.0, &source, "book-2", "epub").expect("stage");
+        let stored = staged.commit().expect("commit");
+
+        assert!(stored.exists());
+        assert_eq!(
+            stored.file_name().and_then(|n| n.to_str()),
+            Some("book-2.epub")
+        );
+        let count = fs::read_dir(&books.0).expect("read books dir").count();
+        assert_eq!(count, 1, "no .part file may survive a successful import");
     }
 
     #[test]
