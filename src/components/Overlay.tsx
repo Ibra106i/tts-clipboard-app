@@ -4,7 +4,7 @@
 // owns the clipboard flow, and the actor's `playback-state` events drive
 // everything rendered here.
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePlayback } from "../hooks/usePlayback";
 import { describeError } from "../lib/errors";
@@ -31,8 +31,17 @@ export function Overlay() {
   // `string.length` would cut UTF-16 code units and split astral characters.
   const displayText = playback.snapshot?.text_preview ?? "";
 
+  // Escape hides the overlay, matching the close button.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") void closeOverlay();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [closeOverlay]);
+
   return (
-    <div className="overlay-root">
+    <div className="overlay-root" role="dialog" aria-label="Clipboard speech">
       <div className="drag-bar" data-tauri-drag-region />
       <Toast message={toast.message} />
       <div className="text-area">

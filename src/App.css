@@ -565,3 +565,10 @@ body {
   color: var(--color-text-muted);
   font-style: italic;
 }
+
+/* ── Keyboard focus visibility (accessibility) ───────────────────── */
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
