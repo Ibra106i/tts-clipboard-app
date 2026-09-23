@@ -243,8 +243,101 @@ fn extract_text_filtered(element: scraper::ElementRef) -> String {
     result
 }
 
+/// Tags that start a new paragraph when stripped; anything else is inline
+/// and must not break the surrounding sentence.
+fn is_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "div"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "li"
+            | "tr"
+            | "blockquote"
+            | "pre"
+            | "section"
+            | "article"
+            | "br"
+            | "hr"
+            | "table"
+            | "ul"
+            | "ol"
+    )
+}
+
+/// Decode the HTML entities a hand-rolled scanner can meet, including the
+/// numeric forms. Without this, TTS literally reads "amp semicolon" aloud.
+fn decode_entities(input: &str) -> String {
+    if !input.contains('&') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let semi = rest.find(';').filter(|&i| i > 1 && i <= 12);
+        match semi {
+            Some(i) => {
+                let entity = &rest[1..i];
+                let decoded = match entity {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some('\u{00a0}'),
+                    "mdash" => Some('—'),
+                    "ndash" => Some('–'),
+                    "hellip" => Some('…'),
+                    "lsquo" | "rsquo" => Some('’'),
+                    "ldquo" | "rdquo" => Some('"'),
+                    other => {
+                        // &#123; or &#x1F600;
+                        let code = if let Some(hex) = other
+                            .strip_prefix("#x")
+                            .or_else(|| other.strip_prefix("#X"))
+                        {
+                            u32::from_str_radix(hex, 16).ok()
+                        } else {
+                            other.strip_prefix('#').and_then(|d| d.parse().ok())
+                        };
+                        code.and_then(char::from_u32)
+                    }
+                };
+                match decoded {
+                    Some(ch) => {
+                        out.push(ch);
+                        rest = &rest[i + 1..];
+                    }
+                    None => {
+                        out.push('&');
+                        rest = &rest[1..];
+                    }
+                }
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Fallback stripper for documents without footnote markers.
+///
+/// The previous version pushed a newline for *every* tag, so
+/// `some <em>italic</em> text` came out as three lines; it also left HTML
+/// entities undecoded for the synthesiser to read aloud character by
+/// character. Both are fixed here.
 fn strip_html(html: &str) -> String {
-    let mut result = String::new();
+    let mut result = String::with_capacity(html.len());
     let mut skip_content = false;
 
     let mut chars = html.chars().peekable();
@@ -252,18 +345,17 @@ fn strip_html(html: &str) -> String {
         if ch == '<' {
             let mut tag_name = String::new();
             while let Some(&next) = chars.peek() {
-                if next == '>' || next == ' ' {
+                if next == '>' || next.is_whitespace() {
                     break;
                 }
                 tag_name.push(next);
                 chars.next();
             }
             while let Some(&next) = chars.peek() {
+                chars.next();
                 if next == '>' {
-                    chars.next();
                     break;
                 }
-                chars.next();
             }
 
             let lower = tag_name.to_lowercase();
@@ -272,7 +364,12 @@ fn strip_html(html: &str) -> String {
             } else if lower == "/script" || lower == "/style" {
                 skip_content = false;
             } else if !skip_content {
-                result.push('\n');
+                // Opening *and* closing block tags break, so paragraphs end
+                // up separated by a blank line; inline tags add nothing.
+                let name = lower.strip_prefix('/').unwrap_or(&lower);
+                if is_block_tag(name) {
+                    result.push('\n');
+                }
             }
             continue;
         }
@@ -284,17 +381,20 @@ fn strip_html(html: &str) -> String {
         result.push(ch);
     }
 
-    let mut cleaned = String::new();
-    let mut prev_was_newline = false;
-    for ch in result.chars() {
+    // Collapse runs of blank lines to a single paragraph break.
+    let mut cleaned = String::with_capacity(result.len());
+    let mut pending_newlines = 0usize;
+    for ch in decode_entities(&result).chars() {
         if ch == '\n' {
-            if !prev_was_newline {
-                cleaned.push(ch);
-            }
-            prev_was_newline = true;
+            pending_newlines = (pending_newlines + 1).min(2);
         } else {
+            if pending_newlines > 0 {
+                for _ in 0..pending_newlines.min(2) {
+                    cleaned.push('\n');
+                }
+                pending_newlines = 0;
+            }
             cleaned.push(ch);
-            prev_was_newline = false;
         }
     }
 
@@ -327,5 +427,46 @@ mod tests {
         let error =
             extract_epub_text("C:/definitely/missing/novel.epub").expect_err("missing file");
         assert_eq!(error.code(), "document_parse_failed");
+    }
+
+    #[test]
+    fn entities_are_decoded_not_read_aloud() {
+        let out = strip_html("<p>Tom&amp;Jerry&#8217;s &nbsp;book&mdash;yes</p>");
+        assert!(
+            out.contains("Tom&Jerry\u{2019}s \u{00a0}book\u{2014}yes"),
+            "entities must decode, got {out:?}"
+        );
+        assert!(!out.contains("amp;"), "raw entity text remains: {out:?}");
+        assert!(!out.contains("&#"), "numeric entity remains: {out:?}");
+    }
+
+    #[test]
+    fn inline_tags_do_not_break_sentences() {
+        let out = strip_html("<p>some <em>italic</em> words</p>");
+        assert_eq!(
+            out.trim().lines().count(),
+            1,
+            "inline tags must not split: {out:?}"
+        );
+        assert_eq!(out.trim(), "some italic words");
+    }
+
+    #[test]
+    fn block_tags_still_start_new_paragraphs() {
+        let out = strip_html("<p>first</p><p>second</p><h2>Head</h2>");
+        assert!(out.contains("first\n\nsecond"), "got {out:?}");
+        assert!(out.contains("second\n\nHead"), "got {out:?}");
+    }
+
+    #[test]
+    fn script_and_style_bodies_are_dropped() {
+        let out = strip_html("<style>p{color:red}</style><p>keep</p><script>alert(1)</script>");
+        assert_eq!(out.trim(), "keep");
+    }
+
+    #[test]
+    fn unknown_entities_pass_through_unchanged() {
+        let out = strip_html("<p>a &weird; b</p>");
+        assert!(out.contains("&weird;"), "got {out:?}");
     }
 }
