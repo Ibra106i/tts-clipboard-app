@@ -404,11 +404,20 @@ async fn cmd_open_logs_folder(app: tauri::AppHandle) -> AppResult<()> {
 async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>> {
     use tauri_plugin_dialog::DialogExt;
 
-    let result = app
-        .dialog()
+    // The dialog API is callback-based; bridge it to async with a channel so
+    // this command no longer parks a runtime worker thread for the whole
+    // time the dialog is open (which used to stall every other command).
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
         .file()
         .add_filter("PDF & EPUB", &["pdf", "epub"])
-        .blocking_pick_file();
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let result: Option<tauri_plugin_dialog::FilePath> = rx
+        .recv()
+        .map_err(|_| AppError::internal("file dialog closed without a result"))?;
 
     match result {
         Some(path) => Ok(Some(path.to_string())),
@@ -418,7 +427,13 @@ async fn cmd_open_file_dialog(app: tauri::AppHandle) -> AppResult<Option<String>
 
 #[tauri::command]
 async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> AppResult<models::Book> {
-    let result = library::import_book(file_path, &app);
+    // Parsing a large PDF can take seconds; run it on the blocking pool so
+    // the async runtime keeps serving other commands meanwhile.
+    let result =
+        tauri::async_runtime::spawn_blocking(move || library::import_book(file_path, &app))
+            .await
+            .map_err(|e| AppError::internal(format!("import task aborted: {e}")))?;
+
     match &result {
         Ok(book) => log::info!(
             "imported \"{}\" ({} chapters, {})",
