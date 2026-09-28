@@ -49,7 +49,7 @@ impl fmt::Display for Chunk {
 /// Byte offset of the `n`-th character, or the length of `text` when it is
 /// shorter. The returned offset is always a valid character boundary, which is
 /// what makes slicing safe.
-fn byte_offset_of_char(text: &str, n: usize) -> usize {
+pub(crate) fn byte_offset_of_char(text: &str, n: usize) -> usize {
     text.char_indices()
         .nth(n)
         .map(|(offset, _)| offset)
@@ -126,6 +126,87 @@ pub fn split_into_chunks(text: &str, max_chars: usize) -> Vec<Chunk> {
     }
 
     chunks
+}
+
+/// Character offset of the start of the first sentence that begins at or after
+/// `char_offset`.
+///
+/// Clicking into a chapter should begin reading at a sentence, not part-way
+/// through one: the speech engine has no way to start mid-utterance, so a chunk
+/// that opens on a clause is spoken with broken prosody. The set of terminators
+/// is the same [`SENTENCE_END`] the chunker already prefers, so a snapped
+/// offset can never land inside a chunk boundary the chunker chose.
+///
+/// A sentence opens at the start of the text, or immediately after a
+/// terminator and any run of whitespace that follows it. A click already sitting
+/// on one of those positions is left alone; a click anywhere else moves
+/// *forward* to the next sentence, so no text is ever skipped twice. When no
+/// terminator follows — the click is in the last sentence — the offset is kept
+/// exactly as given. Offsets past the end of the text are clamped, so the
+/// result is always a valid index into `text`.
+///
+/// The returned offset always points at a non-whitespace character, matching the
+/// convention [`split_into_chunks`] uses for `Chunk::start_char`.
+pub fn snap_to_sentence_start(text: &str, char_offset: usize) -> usize {
+    let target = char_offset.min(char_count(text));
+    if target == 0 {
+        return 0;
+    }
+
+    if opens_a_sentence(text, target) {
+        return skip_whitespace(text, target);
+    }
+
+    // The click is inside a sentence, so move to the one that follows it. The
+    // search starts at the click itself, which is past the terminator of the
+    // sentence being read.
+    let from = byte_offset_of_char(text, target);
+    match text[from..].find(SENTENCE_END) {
+        Some(byte_offset) => {
+            let terminator_end = from
+                + byte_offset
+                + text[from + byte_offset..]
+                    .chars()
+                    .next()
+                    .map_or(0, char::len_utf8);
+            skip_whitespace(text, char_count(&text[..terminator_end]))
+        }
+        None => target,
+    }
+}
+
+/// The character at `char_offset - 1`, or `None` at the start of the text.
+fn char_before(text: &str, char_offset: usize) -> Option<char> {
+    if char_offset == 0 {
+        return None;
+    }
+    text.char_indices().nth(char_offset - 1).map(|(_, ch)| ch)
+}
+
+/// Whether a sentence opens at `char_offset`: either the start of the text, or
+/// a position reached by walking back over whitespace to a terminator.
+fn opens_a_sentence(text: &str, char_offset: usize) -> bool {
+    let mut probe = char_offset;
+    while probe > 0 {
+        match char_before(text, probe) {
+            Some(ch) if ch.is_whitespace() => probe -= 1,
+            Some(ch) => return SENTENCE_END.contains(&ch),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// First non-whitespace character at or after `from`, or the end of the text.
+fn skip_whitespace(text: &str, from: usize) -> usize {
+    let mut at = from;
+    while let Some(ch) = text.chars().nth(at) {
+        if !ch.is_whitespace() {
+            break;
+        }
+        at += 1;
+    }
+    at
 }
 
 #[cfg(test)]
@@ -358,5 +439,77 @@ mod tests {
         let chunks = split_into_chunks(&text, 60);
         assert_invariants(&text, 60, &chunks);
         assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn a_click_mid_sentence_snaps_forward_to_the_next_sentence() {
+        let text = "First one. Second one. Third one.";
+        // Character 14 is inside "Second one." (which spans 11..=21), so the
+        // click must skip the rest of that sentence and land on "Third one.".
+        let snapped = snap_to_sentence_start(text, 14);
+        assert_eq!(text.chars().skip(snapped).collect::<String>(), "Third one.");
+    }
+
+    #[test]
+    fn a_click_already_on_a_sentence_start_snaps_to_that_same_sentence() {
+        let text = "First one. Second one.";
+        // Character 0 opens the first sentence, so the offset must not move.
+        assert_eq!(snap_to_sentence_start(text, 0), 0);
+        // Character 11 opens the second sentence. The terminator at 10 must not
+        // push it past the start of the sentence it already points at.
+        assert_eq!(snap_to_sentence_start(text, 11), 11);
+    }
+
+    #[test]
+    fn a_click_inside_the_final_sentence_stays_where_it_is() {
+        let text = "First one. The last sentence has no terminator";
+        let snapped = snap_to_sentence_start(text, 20);
+        assert_eq!(snapped, 20);
+    }
+
+    #[test]
+    fn snapping_past_the_end_of_the_text_clamps_to_the_text_length() {
+        let text = "Only one sentence.";
+        assert_eq!(snap_to_sentence_start(text, 5_000), char_count(text));
+    }
+
+    #[test]
+    fn snapping_never_splits_a_multi_byte_character() {
+        let text = "Emoji lead 👍 here. After the emoji.";
+        // Character 4 is "e" in "lead"; the byte offset of the emoji's leading
+        // surrogate must never be produced, so a naive byte-slice implementation
+        // would panic here.
+        for offset in 0..=char_count(text) {
+            let snapped = snap_to_sentence_start(text, offset);
+            assert!(
+                text.is_char_boundary(byte_offset_of_char(text, snapped)),
+                "snap for offset {offset} produced a non-boundary at {snapped}"
+            );
+        }
+        assert_eq!(
+            text.chars()
+                .skip(snap_to_sentence_start(text, 5))
+                .collect::<String>(),
+            "After the emoji."
+        );
+    }
+
+    #[test]
+    fn snapping_an_empty_text_stays_at_zero() {
+        assert_eq!(snap_to_sentence_start("", 0), 0);
+        assert_eq!(snap_to_sentence_start("", 12), 0);
+    }
+
+    #[test]
+    fn a_newline_counts_as_a_sentence_boundary() {
+        // `\n` is in `SENTENCE_END`, so a click inside one block snaps to the
+        // start of the next one rather than staying mid-block.
+        let text = "First block here.\nSecond block here.\nThird block here.";
+        let snapped = snap_to_sentence_start(text, 5);
+        assert_eq!(snapped, 18);
+        assert_eq!(
+            text.chars().skip(snapped).collect::<String>(),
+            "Second block here.\nThird block here."
+        );
     }
 }

@@ -291,6 +291,7 @@ async fn handle_hotkey(app: &tauri::AppHandle) -> AppResult<()> {
         playback::PlaybackSource::Clipboard,
         "Clipboard",
         &display_text,
+        None,
     )) {
         Ok(()) => {
             if let Some(window) = app.get_webview_window(OVERLAY_LABEL) {

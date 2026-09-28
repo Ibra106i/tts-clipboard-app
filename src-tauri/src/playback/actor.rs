@@ -514,6 +514,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 "hello world",
+                None,
             ))
             .expect("start");
 
@@ -534,7 +535,7 @@ mod tests {
         handle
             .start(PlaybackJob {
                 chunks: crate::text::split_into_chunks(&text, 10),
-                ..PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", &text)
+                ..PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", &text, None)
             })
             .expect("start");
 
@@ -559,6 +560,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 &"a".repeat(40),
+                None,
             ))
             .expect("start");
 
@@ -604,6 +606,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 &"b".repeat(50),
+                None,
             ))
             .expect("start");
         handle.stop().expect("stop");
@@ -624,6 +627,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 &text,
+                None,
             ))
             .expect("start");
 
@@ -688,6 +692,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 "hello",
+                None,
             ))
             .expect_err("speaking must fail");
         assert_eq!(error.code(), "playback_failed");
@@ -768,6 +773,7 @@ mod tests {
                             PlaybackSource::Clipboard,
                             "Clipboard",
                             &"x".repeat(50 + worker),
+                            None,
                         ));
                     }
                     if i % 7 == 0 {
@@ -800,6 +806,7 @@ mod tests {
                 PlaybackSource::Clipboard,
                 "Clipboard",
                 &"a".repeat(25),
+                None,
             ))
             .expect("start");
 

@@ -345,6 +345,12 @@ pub fn get_book_chapters(book_id: &str, app_handle: &tauri::AppHandle) -> AppRes
     Ok(chapters)
 }
 
+/// Record where the reader has reached.
+///
+/// `position` is a character offset within `chapter`. A reader that restores it
+/// has to survive the book being replaced by a shorter one, or the library file
+/// being edited underneath it, so a position that does not fit the book is
+/// dropped rather than stored.
 pub fn save_reading_position(
     book_id: &str,
     chapter: usize,
@@ -354,9 +360,30 @@ pub fn save_reading_position(
     let mut books = read_library(app_handle)?;
     let index = index_of(&books, book_id)?;
 
-    books[index].current_chapter = chapter;
-    books[index].current_position = position;
+    if !apply_reading_position(&mut books[index], chapter, position) {
+        log::warn!(
+            "Ignoring a reading position for chapter {} of \"{}\", which has {}",
+            chapter,
+            books[index].title,
+            books[index].total_chapters
+        );
+    }
     write_library(app_handle, &books)
+}
+
+/// Record a position on `book`, returning whether it fitted.
+///
+/// A book reports `total_chapters: 0` before its chapters are extracted, so a
+/// book in that state accepts any chapter rather than rejecting every write.
+/// Out of range happens for real reasons: a book re-imported shorter than the
+/// position saved against it, or a library file edited by hand.
+fn apply_reading_position(book: &mut Book, chapter: usize, position: usize) -> bool {
+    if chapter >= book.total_chapters.max(1) {
+        return false;
+    }
+    book.current_chapter = chapter;
+    book.current_position = position;
+    true
 }
 
 #[cfg(test)]
@@ -539,5 +566,40 @@ mod tests {
         let error = write_library_file(&dir.0, &[book("a")]).expect_err("write must fail");
         assert_eq!(error.code(), "storage_failed");
         assert!(error.detail().is_some());
+    }
+
+    #[test]
+    fn a_reading_position_within_the_book_is_stored() {
+        let mut book = book("a");
+        book.total_chapters = 12;
+
+        assert!(apply_reading_position(&mut book, 3, 4_231));
+        assert_eq!(book.current_chapter, 3);
+        assert_eq!(book.current_position, 4_231);
+    }
+
+    #[test]
+    fn a_reading_position_beyond_the_chapters_is_ignored_rather_than_stored() {
+        let mut book = book("a");
+        book.total_chapters = 2;
+        book.current_chapter = 1;
+        book.current_position = 40;
+
+        // A book re-imported shorter than the position saved against it must
+        // not send the reader to a chapter that does not exist.
+        assert!(!apply_reading_position(&mut book, 9, 4_231));
+        assert_eq!(book.current_chapter, 1);
+        assert_eq!(book.current_position, 40);
+    }
+
+    #[test]
+    fn a_book_with_no_extracted_chapters_still_accepts_a_position() {
+        let mut book = book("a");
+        book.total_chapters = 0;
+
+        // `total_chapters: 0` is what a record looks like before extraction, so
+        // rejecting everything would make the position impossible to record.
+        assert!(apply_reading_position(&mut book, 0, 12));
+        assert_eq!(book.current_position, 12);
     }
 }

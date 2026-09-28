@@ -7,6 +7,7 @@
 //!
 //! All lengths here are characters, matching `crate::text`.
 
+use crate::models::TextRange;
 use crate::text::{self, Chunk};
 use serde::{Deserialize, Serialize};
 
@@ -61,17 +62,64 @@ pub struct PlaybackJob {
     /// First [`PREVIEW_CHARS`] characters, for display only.
     pub text_preview: String,
     pub chunks: Vec<Chunk>,
+    /// Offset, in the full source text, of the first character this job reads.
+    ///
+    /// Zero for a whole-text job. The frontend reports it so the reader can show
+    /// where playback began, and persists it as the book's reading position.
+    /// Chunk offsets stay absolute, so `spoken_chars` remains comparable with a
+    /// position in the chapter the reader is looking at.
+    pub start_char: usize,
+    /// The span of the source text this job covers, once resolved against the
+    /// text itself. `None` means the whole text.
+    pub range: Option<ResolvedRange>,
+}
+
+/// A [`TextRange`] after its offsets have been clamped to the text they address
+/// and, when asked, snapped forward to a sentence boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedRange {
+    pub start: usize,
+    pub end: usize,
 }
 
 impl PlaybackJob {
     /// Build a job from raw text, chunking it with the shared rules.
-    pub fn new(source: PlaybackSource, title: impl Into<String>, text: &str) -> Self {
-        let chunks = text::split_into_chunks(text, text::CHUNK_CHARS);
+    ///
+    /// `range` restricts the job to a span of `text`. A span that resolves to
+    /// nothing — an empty selection, or a click past the end of the chapter —
+    /// produces a job with no chunks, which reports itself finished rather than
+    /// failing, so a stale offset can never make the reader refuse to speak.
+    ///
+    /// Chunk offsets are rebased onto `text`, not onto the slice, so every
+    /// offset this job reports is an absolute position in the chapter.
+    pub fn new(
+        source: PlaybackSource,
+        title: impl Into<String>,
+        text: &str,
+        range: Option<TextRange>,
+    ) -> Self {
+        let resolved = range.map(|requested| resolve_range(text, requested));
+        let (start, slice) = match resolved {
+            Some(ResolvedRange { start, end }) => {
+                let from = text::byte_offset_of_char(text, start);
+                let to = text::byte_offset_of_char(text, end);
+                (start, &text[from..to])
+            }
+            None => (0, text),
+        };
+
+        let mut chunks = text::split_into_chunks(slice, text::CHUNK_CHARS);
+        for chunk in &mut chunks {
+            chunk.start_char += start;
+        }
+
         Self {
             source,
             title: title.into(),
-            text_preview: preview(text),
+            text_preview: preview(slice),
             chunks,
+            start_char: start,
+            range: resolved,
         }
     }
 
@@ -81,6 +129,21 @@ impl PlaybackJob {
             .map(|chunk| chunk.char_count as u32)
             .sum()
     }
+}
+
+/// Clamp a requested range to the text and apply sentence alignment.
+fn resolve_range(text: &str, requested: TextRange) -> ResolvedRange {
+    let start = if requested.align_to_sentence {
+        text::snap_to_sentence_start(text, requested.start)
+    } else {
+        requested.start.min(text::char_count(text))
+    };
+    let end = requested
+        .end
+        .unwrap_or_else(|| text::char_count(text))
+        .min(text::char_count(text))
+        .max(start);
+    ResolvedRange { start, end }
 }
 
 fn preview(text: &str) -> String {
@@ -100,6 +163,10 @@ pub struct PlaybackSnapshot {
     /// Characters fully spoken so far, never greater than `total_chars`.
     pub spoken_chars: u32,
     pub total_chars: u32,
+    /// Offset, in the full source text, of the first character being read.
+    /// Non-zero when playback started part-way into a chapter, so the reader can
+    /// show and persist where the user is.
+    pub start_char: usize,
     pub rate: f32,
     /// True once the last chunk of the job has finished.
     pub finished: bool,
@@ -277,6 +344,7 @@ impl PlaybackState {
                 text_preview: job.text_preview.clone(),
                 spoken_chars: self.spoken_chars(offset_in_chunk),
                 total_chars: job.total_chars(),
+                start_char: job.start_char,
                 rate: self.rate,
                 finished: self.finished,
             },
@@ -287,6 +355,7 @@ impl PlaybackState {
                 text_preview: String::new(),
                 spoken_chars: 0,
                 total_chars: 0,
+                start_char: 0,
                 rate: self.rate,
                 finished: false,
             },
@@ -299,10 +368,19 @@ mod tests {
     use super::*;
 
     fn clipboard_job(text: &str) -> PlaybackJob {
-        PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", text)
+        PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", text, None)
     }
 
     fn book_job(book_id: &str, chapter_index: usize, text: &str) -> PlaybackJob {
+        book_job_in(book_id, chapter_index, text, None)
+    }
+
+    fn book_job_in(
+        book_id: &str,
+        chapter_index: usize,
+        text: &str,
+        range: Option<TextRange>,
+    ) -> PlaybackJob {
         PlaybackJob::new(
             PlaybackSource::Book {
                 book_id: book_id.to_string(),
@@ -311,6 +389,7 @@ mod tests {
             },
             format!("Book - Chapter {}", chapter_index + 1),
             text,
+            range,
         )
     }
 
@@ -586,11 +665,150 @@ mod tests {
         assert_eq!(value["source"]["chapter_index"], 2);
         assert_eq!(value["total_chars"], 11);
         assert_eq!(value["spoken_chars"], 0);
+        assert_eq!(value["start_char"], 0);
         assert!(value["finished"].is_boolean());
 
         let idle = PlaybackState::new();
         let value = serde_json::to_value(idle.snapshot(0)).expect("serialize idle snapshot");
         assert_eq!(value["status"], "idle");
         assert!(value["source"].is_null());
+        assert_eq!(value["start_char"], 0);
+    }
+
+    fn range(start: usize, end: Option<usize>, align: bool) -> Option<TextRange> {
+        Some(TextRange {
+            start,
+            end,
+            align_to_sentence: align,
+        })
+    }
+
+    fn spoken(job: &PlaybackJob) -> String {
+        job.chunks
+            .iter()
+            .map(|chunk| chunk.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_range_job_chunks_only_the_selected_text() {
+        // "First sentence." is characters 0..=14, so "Second sentence." is 16..=31.
+        let text = "First sentence. Second sentence. Third sentence.";
+        let job = book_job_in("book-1", 0, text, range(16, Some(32), false));
+
+        assert_eq!(spoken(&job), "Second sentence.");
+        assert_eq!(job.total_chars(), 16);
+    }
+
+    #[test]
+    fn a_range_job_reports_its_absolute_start_offset() {
+        let text = "First sentence. Second sentence. Third sentence.";
+        let job = book_job_in("book-1", 0, text, range(16, Some(32), false));
+
+        assert_eq!(job.start_char, 16);
+        // Chunk offsets are rebased onto the chapter, not onto the slice, so the
+        // frontend can compare them with a position in the text on screen.
+        assert_eq!(job.chunks[0].start_char, 16);
+    }
+
+    #[test]
+    fn a_click_range_runs_to_the_end_of_the_chapter_from_a_sentence_boundary() {
+        // "Third sentence." opens at character 33.
+        let text = "First sentence. Second sentence. Third sentence.";
+        // Character 20 is inside "Second sentence.", so reading begins at the
+        // sentence after it and runs to the end of the chapter.
+        let job = book_job_in("book-1", 0, text, range(20, None, true));
+
+        assert_eq!(job.start_char, 33);
+        assert_eq!(spoken(&job), "Third sentence.");
+    }
+
+    #[test]
+    fn an_empty_range_produces_a_job_that_finishes_immediately() {
+        let text = "Some text that exists.";
+        let mut state = PlaybackState::new();
+        state.start(book_job_in("book-1", 0, text, range(5, Some(5), false)));
+
+        // Nothing to read is not a failure: the reader must not refuse to speak
+        // because a stale selection collapsed.
+        assert_eq!(state.snapshot(0).total_chars, 0);
+        assert!(state.take_next_chunk().is_none());
+        assert!(state.snapshot(0).finished);
+    }
+
+    #[test]
+    fn a_range_starting_past_the_end_of_the_text_reads_nothing_rather_than_failing() {
+        // A stale offset — a book re-imported shorter than the saved position —
+        // clamps to the end of the text, which is an empty span. That is a job
+        // with nothing to say, not an error the reader has to dismiss.
+        let text = "Only one short sentence.";
+        let mut state = PlaybackState::new();
+        state.start(book_job_in("book-1", 0, text, range(5_000, None, true)));
+
+        assert_eq!(state.snapshot(0).start_char, text::char_count(text));
+        assert_eq!(state.snapshot(0).total_chars, 0);
+        assert!(state.take_next_chunk().is_none());
+    }
+
+    #[test]
+    fn a_range_ending_past_the_text_reads_to_the_end_rather_than_failing() {
+        // "Second sentence." opens at 16, and the end is clamped from 9_000 to
+        // the end of the text, so the sentence is read in full.
+        let text = "First sentence. Second sentence.";
+        let job = book_job_in("book-1", 0, text, range(16, Some(9_000), false));
+
+        assert_eq!(spoken(&job), "Second sentence.");
+        assert_eq!(job.range, Some(ResolvedRange { start: 16, end: 32 }));
+    }
+
+    #[test]
+    fn a_range_reading_backwards_is_normalised_to_an_empty_span() {
+        let text = "Some text that exists.";
+        let mut state = PlaybackState::new();
+        // An end before the start cannot be honoured; it must not panic or wrap.
+        state.start(book_job_in("book-1", 0, text, range(20, Some(5), false)));
+
+        assert_eq!(state.snapshot(0).total_chars, 0);
+    }
+
+    #[test]
+    fn a_range_job_previews_the_text_it_reads_rather_than_the_whole_chapter() {
+        // The overlay shows `text_preview`; previewing the chapter start while
+        // reading chapter three would show the reader the wrong words.
+        let text = format!("First chapter text. {}", "Tail sentence. ".repeat(200));
+        let job = book_job_in("book-1", 0, &text, range(20, Some(35), false));
+
+        assert!(job.text_preview.starts_with("Tail sentence."));
+        assert!(!job.text_preview.starts_with("First chapter text."));
+    }
+
+    #[test]
+    fn a_whole_text_job_is_unaffected_by_the_range_grammar() {
+        let text = "First sentence. Second sentence.";
+        let job = book_job("book-1", 0, text);
+
+        assert_eq!(job.start_char, 0);
+        assert_eq!(job.range, None);
+        assert_eq!(spoken(&job), "First sentence. Second sentence.");
+    }
+
+    #[test]
+    fn a_range_of_multi_byte_text_never_splits_a_character() {
+        // Byte-slicing at a character offset is the historical bug this file's
+        // sibling tests guard against; a range must be immune to it.
+        let text = "Emoji 👍 lead in. Second sentence with 👍 more.";
+        let length = text::char_count(text);
+        for start in 0..=length {
+            let job = book_job_in("book-1", 0, text, range(start, None, true));
+            for chunk in &job.chunks {
+                let byte = text::byte_offset_of_char(text, chunk.start_char);
+                assert!(
+                    text.is_char_boundary(byte),
+                    "range from {start} produced a non-boundary chunk start {}",
+                    chunk.start_char
+                );
+            }
+        }
     }
 }

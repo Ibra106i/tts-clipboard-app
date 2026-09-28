@@ -5,12 +5,13 @@
 //! (`playback_get_state`) or an explicit request to change playback.
 
 use crate::error::AppResult;
+use crate::models::TextRange;
 use crate::playback::actor::PlaybackHandle;
 use crate::playback::state::{PlaybackJob, PlaybackSnapshot, PlaybackSource};
 use tauri::State;
 
 fn clipboard_job(text: &str) -> PlaybackJob {
-    PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", text)
+    PlaybackJob::new(PlaybackSource::Clipboard, "Clipboard", text, None)
 }
 
 fn chapter_job(
@@ -18,8 +19,13 @@ fn chapter_job(
     chapter_index: usize,
     total_chapters: usize,
     text: &str,
+    range: Option<TextRange>,
 ) -> PlaybackJob {
-    let title = format!("Chapter {}", chapter_index + 1);
+    let title = if range.is_some() {
+        format!("Chapter {} selection", chapter_index + 1)
+    } else {
+        format!("Chapter {}", chapter_index + 1)
+    };
     PlaybackJob::new(
         PlaybackSource::Book {
             book_id,
@@ -28,6 +34,7 @@ fn chapter_job(
         },
         title,
         text,
+        range,
     )
 }
 
@@ -36,15 +43,28 @@ pub fn speak_text(text: String, playback: State<'_, PlaybackHandle>) -> AppResul
     playback.start(clipboard_job(&text))
 }
 
+/// Read a chapter, or a span of it.
+///
+/// `range` is `None` for a whole-chapter read. When present it selects the span
+/// of `text` to read: the reader sends one when the user clicks a paragraph or
+/// selects a passage. Offsets are characters, and a span that no longer matches
+/// the text is clamped rather than rejected.
 #[tauri::command]
 pub fn speak_book_chapter(
     text: String,
     book_id: String,
     chapter_index: usize,
     total_chapters: usize,
+    range: Option<TextRange>,
     playback: State<'_, PlaybackHandle>,
 ) -> AppResult<()> {
-    playback.start(chapter_job(book_id, chapter_index, total_chapters, &text))
+    playback.start(chapter_job(
+        book_id,
+        chapter_index,
+        total_chapters,
+        &text,
+        range,
+    ))
 }
 
 #[tauri::command]
