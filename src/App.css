@@ -337,6 +337,11 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Where playback began, shown only when it did not begin at the top. */
+.chapter-counter-start {
+  color: var(--color-accent-soft);
+}
+
 .chapter-select {
   max-width: 260px;
   padding: 7px 12px;
@@ -375,10 +380,44 @@ body {
 .chapter-paragraph {
   margin-bottom: 1.2em;
   text-indent: 0;
+  /* Clicking a paragraph reads from it, so it needs to look clickable. The
+     hover state is the whole affordance: these are not buttons and are not
+     focusable, because a tab stop per paragraph would make a long chapter
+     unusable to navigate. */
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  padding-left: 12px;
+  margin-left: -14px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chapter-paragraph:hover {
+  border-left-color: var(--color-accent);
+  background-color: var(--color-surface);
+}
+
+/* The parser separates blocks with a blank line and the reader splits on a
+   single newline, so every block break renders an empty paragraph. It has
+   nothing to read, so it must not look or behave like the paragraphs around
+   it ? and it must not add a margin that reads as a gap the user can click. */
+.chapter-paragraph:empty {
+  cursor: default;
+  margin: 0;
+  padding-left: 0;
+  border-left-color: transparent;
+  background-color: transparent;
 }
 
 .chapter-paragraph:last-child {
   margin-bottom: 0;
+}
+
+/* There is no selection styling anywhere in the app, so a selected passage
+   renders as the browser's default opaque block, which is unreadable against
+   the near-black surface. Selection is how a reader points at text to read. */
+.chapter-text ::selection {
+  background-color: var(--color-accent);
+  color: #ffffff;
 }
 
 /* ── Controls (shared) ──────────────────────────────────────────── */
