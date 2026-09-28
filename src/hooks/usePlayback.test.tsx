@@ -12,6 +12,7 @@ function snapshot(overrides: Partial<PlaybackSnapshot> = {}): PlaybackSnapshot {
     text_preview: "",
     spoken_chars: 0,
     total_chars: 0,
+    start_char: 0,
     rate: 1,
     finished: false,
     ...overrides,

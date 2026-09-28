@@ -51,6 +51,12 @@ export interface PlaybackSnapshot {
   text_preview: string;
   spoken_chars: number;
   total_chars: number;
+  /**
+   * Offset, in the full chapter, of the first character being read. Non-zero
+   * when playback started part-way in, so the reader can show and persist where
+   * the user is.
+   */
+  start_char: number;
   rate: number;
   finished: boolean;
 }
@@ -60,4 +66,18 @@ export interface ChapterFinished {
   book_id: string;
   chapter_index: number;
   total_chapters: number;
+}
+
+/**
+ * A span of chapter text to read, in Unicode characters.
+ *
+ * Mirrors `TextRange` in `src-tauri/src/models.rs`. The two ways the reader
+ * starts mid-chapter differ only in these fields: a click sends
+ * `align_to_sentence: true` with no `end`, a selected passage sends a real
+ * `end` with `align_to_sentence: false`.
+ */
+export interface TextRange {
+  start: number;
+  end?: number | null;
+  align_to_sentence?: boolean;
 }
