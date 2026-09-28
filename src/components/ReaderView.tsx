@@ -5,7 +5,8 @@ import { usePlayback } from "../hooks/usePlayback";
 import { describeError } from "../lib/errors";
 import { formatTime } from "../lib/format";
 import * as ipc from "../lib/ipc";
-import type { Book, Chapter } from "../lib/types";
+import { paragraphStarts } from "../lib/offsets";
+import type { Book, Chapter, TextRange } from "../lib/types";
 
 export interface ReaderViewProps {
   book: Book;
@@ -88,13 +89,14 @@ export function ReaderView({
   });
 
   const startChapter = useCallback(
-    async (chapter: Chapter) => {
+    async (chapter: Chapter, range?: TextRange) => {
       autoAdvanceRef.current = true;
       await playback.startChapter({
         text: chapter.content,
         bookId: book.id,
         chapterIndex: chapter.index,
         totalChapters: chapters.length,
+        range,
       });
     },
     [book.id, chapters.length, playback],
@@ -108,12 +110,47 @@ export function ReaderView({
     (chapter) => chapter.index === currentChapterIdx,
   );
   const chapterText = currentChapter?.content ?? "";
+  // Derived rather than memoised on purpose: the React Compiler owns
+  // memoisation in this component, and hand-written `useMemo` around these
+  // values is what it refuses to preserve.
+  const paragraphs = chapterText.split("\n");
+  // The character offset of each rendered paragraph within the chapter. The
+  // backend measures in characters, so these are code-point offsets too.
+  const starts = paragraphStarts(chapterText);
+
+  // Which paragraph playback began in: the last one starting at or before the
+  // offset the backend reports. Negative means it began at the top.
+  const startedAt = playback.snapshot?.start_char ?? 0;
+  let startParagraph = -1;
+  for (let index = 0; index < starts.length; index += 1) {
+    if ((starts[index] ?? 0) > startedAt) break;
+    startParagraph = index;
+  }
+  if (startedAt <= 0) startParagraph = -1;
 
   // Plain function: it is only used as a click handler, and memoizing it would
   // depend on a chapter object derived from props on every render.
   const handleSpeak = () => {
     if (!currentChapter) return;
     void startChapter(currentChapter);
+  };
+
+  // Clicking a paragraph reads from the sentence at or after its start.
+  //
+  // This is deliberately not a button. Making every paragraph focusable would
+  // put a tab stop on every block of every chapter, which makes the reader
+  // unusable by keyboard — a worse outcome than a convenience that only works
+  // with a mouse. Keyboard users already have the chapter select and the
+  // Speak Chapter button, both properly labelled, which reach every position
+  // this does.
+  const handleParagraphClick = (index: number) => {
+    if (!currentChapter) return;
+    // A click that lands on whitespace between blocks has nothing to read.
+    if (!paragraphs[index]?.trim()) return;
+    void startChapter(currentChapter, {
+      start: starts[index] ?? 0,
+      align_to_sentence: true,
+    });
   };
 
   const handleBack = useCallback(async () => {
@@ -150,6 +187,9 @@ export function ReaderView({
         <span className="reader-title">{book.title}</span>
         <span className="chapter-counter">
           Ch. {currentChapterIdx + 1}/{chapters.length}
+          {startParagraph >= 0 ? (
+            <span className="chapter-counter-start"> · from ¶{startParagraph + 1}</span>
+          ) : null}
         </span>
         <select
           className="chapter-select"
@@ -168,8 +208,18 @@ export function ReaderView({
       <div className="reader-content">
         {chapterText ? (
           <div className="chapter-text">
-            {chapterText.split("\n").map((paragraph, i) => (
-              <p key={i} className="chapter-paragraph">
+            {paragraphs.map((paragraph, i) => (
+              <p
+                key={i}
+                className="chapter-paragraph"
+                // The offset is the paragraph's own position in the chapter, so
+                // the click asks the backend to read from here rather than
+                // slicing the text here and risking a unit mismatch.
+                data-start-char={starts[i] ?? 0}
+                onClick={
+                  paragraph.trim() ? () => handleParagraphClick(i) : undefined
+                }
+              >
                 {paragraph}
               </p>
             ))}
