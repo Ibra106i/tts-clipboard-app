@@ -23,6 +23,24 @@ describe("typed IPC layer", () => {
       bookId: "book-1",
       chapterIndex: 3,
       totalChapters: 10,
+      // A whole-chapter read sends an explicit null rather than omitting the
+      // key, so the backend always sees the same argument shape.
+      range: null,
+    });
+  });
+
+  it("sends the character range unchanged when reading part of a chapter", async () => {
+    harness.on("speak_book_chapter", () => undefined);
+    await ipc.speakBookChapter({
+      text: "hello",
+      bookId: "book-1",
+      chapterIndex: 3,
+      totalChapters: 10,
+      range: { start: 4_231, end: 5_904, align_to_sentence: false },
+    });
+
+    expect(harness.callsFor("speak_book_chapter")[0]?.args).toMatchObject({
+      range: { start: 4_231, end: 5_904, align_to_sentence: false },
     });
   });
 

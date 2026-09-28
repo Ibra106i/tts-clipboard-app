@@ -5,7 +5,7 @@
 // what lets the compiler catch a renamed command or a changed payload shape.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { Book, Chapter, PlaybackSnapshot } from "./types";
+import type { Book, Chapter, PlaybackSnapshot, TextRange } from "./types";
 
 // ── Playback ───────────────────────────────────────────────────────
 
@@ -14,18 +14,25 @@ export function speakText(text: string): Promise<void> {
   return invoke("speak_text", { text });
 }
 
-/** Speak a chapter of a book, identifying it for auto-advance. */
+/**
+ * Speak a chapter of a book, identifying it for auto-advance.
+ *
+ * `range` restricts the read to a span of the chapter, in characters. Omit it
+ * to read the whole chapter from the start.
+ */
 export function speakBookChapter(args: {
   text: string;
   bookId: string;
   chapterIndex: number;
   totalChapters: number;
+  range?: TextRange;
 }): Promise<void> {
   return invoke("speak_book_chapter", {
     text: args.text,
     bookId: args.bookId,
     chapterIndex: args.chapterIndex,
     totalChapters: args.totalChapters,
+    range: args.range ?? null,
   });
 }
 
