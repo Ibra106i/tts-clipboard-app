@@ -3,6 +3,7 @@ import {
   codePointLength,
   paragraphStarts,
   pointToCharOffset,
+  rangeToCharRange,
 } from "./offsets";
 
 /** A chapter-shaped container: one element per `split("\n")` segment. */
@@ -146,5 +147,79 @@ describe("pointToCharOffset", () => {
     // Offset 2 is the low surrogate of the emoji; the answer must be a real
     // character boundary, never a position inside the pair.
     expect(pointToCharOffset(container, blockText(container, 0), 2)).toBe(1);
+  });
+});
+
+describe("rangeToCharRange", () => {
+  function rangeOver(node: Node, start: number, end: number): Range {
+    const range = document.createRange();
+    range.setStart(node, start);
+    range.setEnd(node, end);
+    return range;
+  }
+
+  it("maps a selection within one paragraph to a character span", () => {
+    const container = renderChapter("alpha beta");
+    const span = rangeToCharRange(
+      container,
+      rangeOver(blockText(container, 0), 0, 5),
+    );
+    expect(span).toEqual({ start: 0, end: 5 });
+  });
+
+  it("counts an emoji once across a selection", () => {
+    const container = renderChapter("a👍b");
+    // UTF-16 1..4 is the emoji and the b; in characters that is 1..3.
+    const span = rangeToCharRange(
+      container,
+      rangeOver(blockText(container, 0), 1, 4),
+    );
+    expect(span).toEqual({ start: 1, end: 3 });
+  });
+
+  it("accumulates across paragraphs for a selection spanning two of them", () => {
+    const container = renderChapter("one\ntwo");
+    const range = document.createRange();
+    range.setStart(blockText(container, 0), 1);
+    range.setEnd(blockText(container, 1), 2);
+    const span = rangeToCharRange(container, range);
+    expect(span).toEqual({ start: 1, end: 6 });
+  });
+
+  it("handles a selection dragged right to left", () => {
+    // A user selecting backwards produces a selection whose anchor is after
+    // its focus. The browser normalises the Range it reports, so the span must
+    // still come out in reading order rather than inverted. The container has
+    // to be in the document for the selection to register any ranges at all.
+    const container = renderChapter("alpha beta");
+    document.body.appendChild(container);
+    const node = blockText(container, 0);
+    const selection = window.getSelection();
+    if (!selection) throw new Error("expected a selection");
+    selection.setBaseAndExtent(node, 8, node, 2);
+
+    const range = selection.getRangeAt(0);
+    expect(rangeToCharRange(container, range)).toEqual({ start: 2, end: 8 });
+    container.remove();
+  });
+
+  it("reports nothing for a collapsed selection", () => {
+    const container = renderChapter("alpha beta");
+    const range = document.createRange();
+    range.setStart(blockText(container, 0), 3);
+    range.collapse(true);
+    expect(rangeToCharRange(container, range)).toBeNull();
+  });
+
+  it("reports nothing for a selection reaching outside the container", () => {
+    const container = renderChapter("inside");
+    const outside = document.createElement("p");
+    outside.textContent = "elsewhere";
+    document.body.appendChild(outside);
+    const node = outside.firstChild;
+    if (!node) throw new Error("expected the outside paragraph to have text");
+
+    expect(rangeToCharRange(container, rangeOver(node, 0, 3))).toBeNull();
+    outside.remove();
   });
 });
