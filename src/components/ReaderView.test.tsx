@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ReaderView } from "./ReaderView";
@@ -163,5 +163,138 @@ describe("ReaderView paragraph click", () => {
 
     await screen.findByText("First block here.");
     expect(screen.queryByText(/from ¶/)).not.toBeInTheDocument();
+  });
+});
+
+/** The element the reader listens for the end of a selection drag on. */
+function textContainer(): HTMLElement {
+  const element = document.querySelector<HTMLElement>(".reader-content");
+  if (!element) throw new Error("expected the reader text container");
+  return element;
+}
+
+/**
+ * Select a span of one paragraph and raise the end-of-drag event where the
+ * reader listens for it.
+ *
+ * Firing on the container rather than clicking a paragraph matters: a real
+ * click would also start a paragraph read, and the test would be measuring two
+ * things at once.
+ */
+async function selectSpan(node: Node, startOffset: number, endOffset: number) {
+  const range = document.createRange();
+  range.setStart(node, startOffset);
+  range.setEnd(node, endOffset);
+  const selection = window.getSelection();
+  if (!selection) throw new Error("expected a selection");
+  selection.removeAllRanges();
+  selection.addRange(range);
+  fireEvent.mouseUp(textContainer());
+}
+
+function firstParagraphText(): Node {
+  const text = screen.getByText(/^First block here\.$/).firstChild;
+  if (!text) throw new Error("expected the first paragraph to have text");
+  return text;
+}
+
+describe("ReaderView selection", () => {
+  it("offers to read a selected passage", async () => {
+    idleBackend();
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await selectSpan(firstParagraphText(), 0, 5);
+
+    expect(
+      await screen.findByRole("button", { name: "Read this selection" }),
+    ).toBeInTheDocument();
+  });
+
+  it("reads exactly the characters that were selected", async () => {
+    idleBackend();
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await selectSpan(firstParagraphText(), 0, 5);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Read this selection" }),
+    );
+
+    await waitFor(() => {
+      expect(harness.callsFor("speak_book_chapter")).toHaveLength(1);
+    });
+    // The user chose these five characters, so the range must not be snapped to
+    // a sentence boundary: that would silently drop the first word.
+    expect(lastRead().range).toEqual({ start: 0, end: 5, align_to_sentence: false });
+  });
+
+  it("reads a selection that contains an emoji at the right offset", async () => {
+    idleBackend();
+    renderReader([chapter(0, "a👍b ends here")]);
+
+    const text = screen.getByText(/^a👍b ends here$/).firstChild;
+    if (!text) throw new Error("expected text");
+    // "a" is UTF-16 0, the emoji occupies 1 and 2, and "b" is 3, so 1..4 is the
+    // emoji and the b. An implementation that trusted `String.length` would
+    // report end 4 here instead of 3, and read one character too far.
+    await selectSpan(text, 1, 4);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Read this selection" }),
+    );
+
+    await waitFor(() => {
+      expect(lastRead().range).toEqual({
+        start: 1,
+        end: 3,
+        align_to_sentence: false,
+      });
+    });
+  });
+
+  it("offers nothing when the caret is collapsed", async () => {
+    idleBackend();
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    const range = document.createRange();
+    range.setStart(firstParagraphText(), 3);
+    range.collapse(true);
+    const selection = window.getSelection();
+    if (!selection) throw new Error("expected a selection");
+    selection.removeAllRanges();
+    selection.addRange(range);
+    fireEvent.mouseUp(textContainer());
+
+    expect(
+      screen.queryByRole("button", { name: "Read this selection" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("dismisses the offer when the selection is abandoned", async () => {
+    idleBackend();
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await selectSpan(firstParagraphText(), 0, 5);
+    await screen.findByRole("button", { name: "Read this selection" });
+
+    await userEvent.keyboard("{Escape}");
+
+    expect(
+      screen.queryByRole("button", { name: "Read this selection" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears the offer once the selection has been read", async () => {
+    idleBackend();
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await selectSpan(firstParagraphText(), 0, 5);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Read this selection" }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("button", { name: "Read this selection" }),
+      ).not.toBeInTheDocument();
+    });
   });
 });

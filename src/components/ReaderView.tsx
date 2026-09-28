@@ -1,11 +1,15 @@
 // The reader: chapter text, chapter selection and playback controls.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePlayback } from "../hooks/usePlayback";
 import { describeError } from "../lib/errors";
 import { formatTime } from "../lib/format";
 import * as ipc from "../lib/ipc";
-import { paragraphStarts } from "../lib/offsets";
+import {
+  paragraphStarts,
+  rangeToCharRange,
+  type CharRange,
+} from "../lib/offsets";
 import type { Book, Chapter, TextRange } from "../lib/types";
 
 export interface ReaderViewProps {
@@ -128,6 +132,62 @@ export function ReaderView({
   }
   if (startedAt <= 0) startParagraph = -1;
 
+  // The span the user has selected, ready to be read on request. Null whenever
+  // there is nothing to offer, which is the common case: most of the time the
+  // caret is collapsed or the selection lives outside the chapter text.
+  const [selected, setSelected] = useState<CharRange | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  // Plain functions rather than `useCallback`: the React Compiler owns
+  // memoisation in this component and refuses to preserve hand-written hooks
+  // over these values, so asking for one buys nothing and costs a lint error.
+  const clearSelection = () => {
+    setSelected(null);
+    window.getSelection()?.removeAllRanges();
+  };
+
+  const handleSelect = () => {
+    const container = contentRef.current;
+    const selection = window.getSelection();
+    if (!container || !selection || selection.rangeCount === 0) {
+      setSelected(null);
+      return;
+    }
+    const range = rangeToCharRange(container, selection.getRangeAt(0));
+    // A span of no characters, or one with nothing but whitespace in it, is
+    // not something to read; offering it would be a dead button.
+    if (!range || !chapterText.slice(range.start, range.end).trim()) {
+      setSelected(null);
+      return;
+    }
+    setSelected(range);
+  };
+
+  const handleReadSelection = () => {
+    if (!currentChapter || !selected) return;
+    void startChapter(currentChapter, {
+      start: selected.start,
+      end: selected.end,
+      // The user chose these characters; reading them from a sentence boundary
+      // instead would silently drop the first word or two of their selection.
+      align_to_sentence: false,
+    });
+    clearSelection();
+  };
+
+  // Escape dismisses the offer without reading, so a selection can be abandoned.
+  useEffect(() => {
+    if (!selected) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelected(null);
+        window.getSelection()?.removeAllRanges();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selected]);
+
   // Plain function: it is only used as a click handler, and memoizing it would
   // depend on a chapter object derived from props on every render.
   const handleSpeak = () => {
@@ -205,7 +265,7 @@ export function ReaderView({
         </select>
       </header>
 
-      <div className="reader-content">
+      <div className="reader-content" ref={contentRef} onMouseUp={handleSelect}>
         {chapterText ? (
           <div className="chapter-text">
             {paragraphs.map((paragraph, i) => (
@@ -230,6 +290,22 @@ export function ReaderView({
           </div>
         )}
       </div>
+
+      {selected ? (
+        <div className="selection-pill" role="group" aria-label="Read selection">
+          <span className="selection-pill-length">
+            {selected.end - selected.start} characters
+          </span>
+          <button
+            type="button"
+            className="selection-pill-action"
+            onClick={handleReadSelection}
+            aria-label="Read this selection"
+          >
+            🔊 Read this
+          </button>
+        </div>
+      ) : null}
 
       <div className="reader-controls">
         <button
