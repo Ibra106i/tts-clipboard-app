@@ -8,6 +8,15 @@ const mock = (relativePath: string) =>
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  // The dependency scanner crawls the project root looking for entry points.
+  // Left to its own devices it walks into `src-tauri/target/`, which after a
+  // `cargo doc` or a debug build holds tens of thousands of generated rustdoc
+  // HTML files, and the scan dies with `EMFILE: too many open files`.
+  // `server.watch.ignored` below only covers the HMR watcher, not this scan, so
+  // the entry points are pinned explicitly here.
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   server: {
     watch: {
       ignored: ['**/src-tauri/**'],
