@@ -23,6 +23,7 @@ import type {
   ChapterFinished,
   PlaybackSnapshot,
   PlaybackStatus,
+  TextRange,
 } from "../lib/types";
 
 /** Rate multipliers offered by the UI, in cycle order. */
@@ -34,6 +35,15 @@ export interface StartChapterArgs {
   bookId: string;
   chapterIndex: number;
   totalChapters: number;
+  /**
+   * Read only a span of `text`, in characters. Omit to read from the start of
+   * the chapter.
+   *
+   * Whether finishing a partial read should continue into the next chapter is
+   * not decided here: the hook reports `chapter-finished` and lets the view
+   * decide, so that policy stays with whoever armed it.
+   */
+  range?: TextRange;
 }
 
 export interface UsePlaybackOptions {
