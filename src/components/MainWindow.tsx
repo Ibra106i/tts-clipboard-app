@@ -20,6 +20,7 @@ export function MainWindow() {
   const [selectedBook, setSelectedBook] = useState<Book | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [currentChapterIdx, setCurrentChapterIdx] = useState(0);
+  const [startPosition, setStartPosition] = useState(0);
 
   const toast = useToast();
   const showToast = toast.show;
@@ -88,6 +89,10 @@ export function MainWindow() {
         setSelectedBook(book);
         setChapters(loaded);
         setCurrentChapterIdx(book.current_chapter);
+        // The saved position belongs to the chapter it was saved against, so
+        // it is only meaningful alongside that chapter. Moving to another
+        // chapter clears it, which is what the handlers below do.
+        setStartPosition(book.current_position);
         setView("reader");
       } catch (err) {
         showToast(`Failed to load book: ${describeError(err)}`);
@@ -101,15 +106,20 @@ export function MainWindow() {
     setView("library");
     setSelectedBook(null);
     setChapters([]);
+    setStartPosition(0);
     void refreshLibrary();
   }, [refreshLibrary]);
 
+  // Both of these change which chapter is showing, which is also what makes a
+  // position recorded against the previous one meaningless.
   const handleChapterChange = useCallback((index: number) => {
     setCurrentChapterIdx(index);
+    setStartPosition(0);
   }, []);
 
   const handleReadingPositionChange = useCallback((index: number) => {
     setCurrentChapterIdx(index);
+    setStartPosition(0);
   }, []);
 
   // Drag and drop is handled by the OS via Tauri, not by the browser's HTML5
@@ -125,6 +135,7 @@ export function MainWindow() {
           book={selectedBook}
           chapters={chapters}
           currentChapterIdx={currentChapterIdx}
+          startPosition={startPosition}
           onChapterChange={handleChapterChange}
           onReadingPositionChange={handleReadingPositionChange}
           onBack={handleBackToLibrary}

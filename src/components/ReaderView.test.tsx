@@ -29,13 +29,18 @@ function lastRead(): Record<string, unknown> {
   return calls[calls.length - 1]?.args ?? {};
 }
 
-function renderReader(chapters: Chapter[], currentChapterIdx = 0) {
+function renderReader(
+  chapters: Chapter[],
+  currentChapterIdx = 0,
+  startPosition = 0,
+) {
   const onMessage = vi.fn();
   render(
     <ReaderView
       book={book()}
       chapters={chapters}
       currentChapterIdx={currentChapterIdx}
+      startPosition={startPosition}
       onChapterChange={vi.fn()}
       onReadingPositionChange={vi.fn()}
       onBack={vi.fn()}
@@ -296,5 +301,103 @@ describe("ReaderView selection", () => {
         screen.queryByRole("button", { name: "Read this selection" }),
       ).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("ReaderView reading position", () => {
+  it("saves where the read began rather than the top of the chapter", async () => {
+    harness.onAll({
+      playback_get_state: () => null,
+      stop_tts: () => undefined,
+      speak_book_chapter: () => undefined,
+      cmd_save_reading_position: () => undefined,
+    });
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await userEvent.click(screen.getByText("Second block here."));
+    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+
+    await waitFor(() => {
+      const calls = harness.callsFor("cmd_save_reading_position");
+      expect(calls[calls.length - 1]?.args).toEqual({
+        bookId: "b1",
+        chapter: 0,
+        // The read began at the second block, so that is what has to be saved.
+        position: 19,
+      });
+    });
+  });
+
+  it("saves the top of the chapter when the whole chapter was read", async () => {
+    harness.onAll({
+      playback_get_state: () => null,
+      stop_tts: () => undefined,
+      speak_book_chapter: () => undefined,
+      cmd_save_reading_position: () => undefined,
+    });
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    await userEvent.click(screen.getByRole("button", { name: "🔊 Speak Chapter" }));
+    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+
+    await waitFor(() => {
+      const calls = harness.callsFor("cmd_save_reading_position");
+      expect(calls[calls.length - 1]?.args).toMatchObject({ position: 0 });
+    });
+  });
+
+  it("carries a saved position over from the book record", async () => {
+    harness.onAll({
+      playback_get_state: () => null,
+      stop_tts: () => undefined,
+      cmd_save_reading_position: () => undefined,
+    });
+    // The book record says the reader was 19 characters into chapter 0.
+    renderReader([chapter(0, TWO_BLOCKS)], 0, 19);
+
+    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+
+    await waitFor(() => {
+      const calls = harness.callsFor("cmd_save_reading_position");
+      expect(calls[calls.length - 1]?.args).toMatchObject({ position: 19 });
+    });
+  });
+
+  it("records the position of the chapter being left", async () => {
+    const onChapterChange = vi.fn();
+    harness.onAll({
+      playback_get_state: () => null,
+      stop_tts: () => undefined,
+      cmd_save_reading_position: () => undefined,
+    });
+    render(
+      <ReaderView
+        book={book()}
+        chapters={[chapter(0, TWO_BLOCKS), chapter(1, "Later chapter")]}
+        currentChapterIdx={0}
+        startPosition={19}
+        onChapterChange={onChapterChange}
+        onReadingPositionChange={vi.fn()}
+        onBack={vi.fn()}
+        onMessage={vi.fn()}
+      />,
+    );
+
+    await userEvent.selectOptions(
+      screen.getByLabelText("Select chapter"),
+      "1",
+    );
+
+    // The chapter it left keeps its own position; the one it moved to starts
+    // fresh, which is why the container clears the position on chapter change.
+    await waitFor(() => {
+      const calls = harness.callsFor("cmd_save_reading_position");
+      expect(calls[calls.length - 1]?.args).toEqual({
+        bookId: "b1",
+        chapter: 0,
+        position: 19,
+      });
+    });
+    expect(onChapterChange).toHaveBeenCalledWith(1);
   });
 });

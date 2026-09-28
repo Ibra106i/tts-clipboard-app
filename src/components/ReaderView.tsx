@@ -16,6 +16,11 @@ export interface ReaderViewProps {
   book: Book;
   chapters: Chapter[];
   currentChapterIdx: number;
+  /**
+   * Character offset within the current chapter to resume from, taken from the
+   * book record. Zero means the chapter starts at the top.
+   */
+  startPosition?: number;
   onChapterChange: (index: number) => void;
   onReadingPositionChange: (index: number) => void;
   onBack: () => void;
@@ -28,6 +33,7 @@ export function ReaderView({
   book,
   chapters,
   currentChapterIdx,
+  startPosition = 0,
   onChapterChange,
   onReadingPositionChange,
   onBack,
@@ -46,6 +52,13 @@ export function ReaderView({
   const startChapterRef = useRef<(chapter: Chapter) => Promise<void>>(
     async () => {},
   );
+  // The character offset the reader should resume from if it is closed. Seeded
+  // from the book record, then replaced whenever a read starts somewhere
+  // specific, and reset when the chapter changes.
+  const resumeAtRef = useRef(startPosition);
+  useEffect(() => {
+    resumeAtRef.current = startPosition;
+  }, [startPosition]);
   useEffect(() => {
     chaptersRef.current = chapters;
   }, [chapters]);
@@ -95,6 +108,9 @@ export function ReaderView({
   const startChapter = useCallback(
     async (chapter: Chapter, range?: TextRange) => {
       autoAdvanceRef.current = true;
+      // Where this read began, so leaving the reader resumes there rather than
+      // at the top of the chapter. A whole-chapter read means the top.
+      resumeAtRef.current = range?.start ?? 0;
       await playback.startChapter({
         text: chapter.content,
         bookId: book.id,
@@ -220,7 +236,9 @@ export function ReaderView({
       .saveReadingPosition({
         bookId: book.id,
         chapter: currentChapterIdx,
-        position: 0,
+        // Where the read actually began, not a hard-coded zero: closing the
+        // reader after clicking into a chapter has to come back to that spot.
+        position: resumeAtRef.current,
       })
       .catch((err) => {
         showToast(`Could not save your place: ${describeError(err)}`);
@@ -232,10 +250,28 @@ export function ReaderView({
     (index: number) => {
       autoAdvanceRef.current = false;
       void playback.stop();
+      // Record where the reader was before it moved, so the chapter it left
+      // still opens at the right paragraph next time.
+      void ipc
+        .saveReadingPosition({
+          bookId: book.id,
+          chapter: currentChapterIdx,
+          position: resumeAtRef.current,
+        })
+        .catch((err) => {
+          showToast(`Could not save your place: ${describeError(err)}`);
+        });
       onChapterChange(index);
       onReadingPositionChange(index);
     },
-    [onChapterChange, onReadingPositionChange, playback],
+    [
+      book.id,
+      currentChapterIdx,
+      onChapterChange,
+      onReadingPositionChange,
+      playback,
+      showToast,
+    ],
   );
 
   return (
