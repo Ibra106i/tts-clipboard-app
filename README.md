@@ -9,6 +9,8 @@ built with Tauri v2, React 19, TypeScript and Windows SAPI 5.
   floating overlay, no matter which app you are in.
 - **Library**: import PDF and EPUB documents, browse them, resume where you
   left off, and delete what you no longer want.
+- **Read from anywhere**: click a paragraph to start reading at the sentence
+  from there onwards, or select a passage and read exactly that.
 - **Playback**: play, pause, resume, stop, variable speech rate, live progress
   with elapsed/estimated-total time, and automatic progression to the next
   chapter.
@@ -38,16 +40,22 @@ The first Rust build takes a few minutes; subsequent builds are incremental.
 
 ## Commands
 
-| Command              | What it does                                  |
-| -------------------- | --------------------------------------------- |
-| `npm run tauri dev`  | Run the desktop app with hot reload           |
-| `npm run dev`        | Frontend only (in a browser, without Tauri)   |
-| `npm run build`      | Production frontend bundle (`dist/`)          |
-| `npm run typecheck`  | TypeScript project check                      |
-| `npm run lint`       | oxlint with warnings denied                   |
-| `npm test`           | Vitest unit tests (jsdom + Testing Library)   |
-| `npm run test:rust`  | `cargo fmt --check`, clippy and tests         |
-| `npm run tauri build`| Release installer/binary                      |
+| Command                | What it does                                  |
+| ---------------------- | --------------------------------------------- |
+| `npm run tauri dev`    | Run the desktop app with hot reload           |
+| `npm run dev`          | Frontend only (in a browser, without Tauri)   |
+| `npm run build`        | Production frontend bundle (`dist/`)          |
+| `npm run typecheck`    | TypeScript project check                      |
+| `npm run lint`         | oxlint with warnings denied                   |
+| `npm test`             | Vitest unit tests (jsdom + Testing Library)   |
+| `npm run test:rust`    | Rust unit tests only (`cargo test`)           |
+| `npm run fmt:rust:check` | Check Rust formatting (`cargo fmt --check`) |
+| `npm run lint:rust`    | Clippy with warnings denied                   |
+| `npm run verify`       | Everything CI runs, in one command            |
+| `npm run tauri build`  | Release installer/binary                      |
+
+`npm run verify` is the gate: typecheck, oxlint, Vitest, rustfmt, clippy and
+`cargo test`. CI runs the same six steps individually.
 
 Rust-side checks can also be run directly from `src-tauri/`:
 
@@ -64,12 +72,15 @@ src/                       React frontend
   components/              MainWindow, LibraryView, ReaderView, Overlay, Toast
   hooks/usePlayback.ts     single subscription to playback state for every window
   lib/ipc.ts               typed wrappers over the Tauri commands
+  lib/offsets.ts           DOM/character offset mapping, in code points
   lib/errors.ts            normalises backend structured errors for display
 src-tauri/                 Rust backend
   src/playback/            the playback actor
     actor.rs               the one thread that owns the engine and state machine
     state.rs               platform-agnostic playback state machine (pure, unit-tested)
     speaker_windows.rs     SAPI 5 engine, created and used on the actor thread
+  src/text.rs              character-based chunking and sentence alignment
+  src/models.rs            the persisted schema, including the read range
   src/library.rs           import/dedup/persistence (atomic JSON writes)
   src/parser.rs            PDF (lopdf) and EPUB (epub + scraper) extraction
   src/error.rs             structured error model surfaced to the frontend
@@ -81,7 +92,10 @@ Key invariants:
   commands and UI only observe snapshots. Persistence goes through
   `library.rs` with atomic temp-file-then-rename writes.
 - **Unicode correctness.** Text is chunked and measured in characters, never
-  bytes or UTF-16 units; APIs are named after the unit they use.
+  bytes or UTF-16 units; APIs are named after the unit they use. This holds
+  across the bridge too: the DOM hands out UTF-16 offsets, so
+  `lib/offsets.ts` re-counts every position in code points before sending it.
+  The `codePointLength` tests are the guard, not a formality.
 - **No hidden state machines.** Windows communicate through typed backend
   events (`playback-state`, `chapter-finished`), not browser CustomEvents.
 - **Errors are structured and surfaced.** Every failure has a code, a
