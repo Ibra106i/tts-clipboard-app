@@ -74,7 +74,7 @@ per-commit record.
   README rewritten, dependencies pruned and refreshed.
 
 ### Quality gates
-- 101 Rust unit tests + 85 frontend tests, clippy and rustfmt clean, strict
+- 101 Rust unit tests + 91 frontend tests, clippy and rustfmt clean, strict
   TypeScript, oxlint, `npm audit` clean, release profile tuned, and a CI
   workflow running typecheck, lint, tests, and a Windows Tauri build.
 - Always-on logging observable in release builds.
