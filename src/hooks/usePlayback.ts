@@ -66,7 +66,12 @@ export interface UsePlaybackResult {
   /** 0-100, from characters spoken over characters total. */
   progressPercent: number;
   estimatedTotalMs: number;
-  elapsedMs: number;
+  /**
+   * Identifies the passage currently being read, so a clock can tell one read
+   * from the next. Derived from the job itself rather than a counter, so it is
+   * correct in every window and across a stop followed by an identical read.
+   */
+  playbackKey: string;
   rate: number;
   isPlaying: boolean;
   isPaused: boolean;
@@ -83,7 +88,6 @@ export function usePlayback(
 ): UsePlaybackResult {
   const [snapshot, setSnapshot] = useState<PlaybackSnapshot | null>(null);
   const [rateIndex, setRateIndex] = useState(DEFAULT_RATE_INDEX);
-  const [elapsedMs, setElapsedMs] = useState(0);
 
   // Callbacks are kept in a ref (updated after render, never during) so that
   // changing them does not re-register listeners, and so the reporting path
@@ -97,25 +101,9 @@ export function usePlayback(
     callbacksRef.current.onError?.(message);
   }, []);
 
-  // Elapsed time is measured locally and only while playing. It is a clock,
-  // not control flow: it never asks the backend anything.
-  const startedAtRef = useRef(0);
-  const accumulatedRef = useRef(0);
   const status = snapshot?.status ?? "idle";
   const isPlaying = status === "playing";
   const isPaused = status === "paused";
-
-  useEffect(() => {
-    if (!isPlaying) {
-      accumulatedRef.current += Date.now() - startedAtRef.current;
-      return;
-    }
-    startedAtRef.current = Date.now();
-    const timer = setInterval(() => {
-      setElapsedMs(accumulatedRef.current + (Date.now() - startedAtRef.current));
-    }, 250);
-    return () => clearInterval(timer);
-  }, [isPlaying]);
 
   // One draw of the initial state, so a window opened mid-playback is not
   // blank until the next event.
@@ -143,10 +131,6 @@ export function usePlayback(
       () =>
         listen<PlaybackSnapshot>("playback-state", (event) => {
           setSnapshot(event.payload);
-          if (event.payload.source === null || event.payload.finished) {
-            accumulatedRef.current = 0;
-            setElapsedMs(0);
-          }
         }),
       () =>
         listen<ChapterFinished>("chapter-finished", (event) => {
@@ -159,6 +143,13 @@ export function usePlayback(
       () =>
         listen("clipboard-empty", () => {
           reportError("Copy some text first.");
+        }),
+      // The backend ends playback and says so when the speech engine stops
+      // answering. Surfacing the reason is the whole point: without it the
+      // window just stops, which is indistinguishable from a hang.
+      () =>
+        listen<{ message: string }>("playback-engine-lost", (event) => {
+          reportError(event.payload.message);
         }),
     ]);
 
@@ -193,14 +184,13 @@ export function usePlayback(
 
   const startChapter = useCallback(
     async (args: StartChapterArgs) => {
-      // Replace whatever is playing rather than failing with "busy".
-      try {
-        await ipc.stop();
-      } catch (err) {
-        // Stopping an idle player is the state we wanted anyway, so this is
-        // not an error the user needs to see; record it in the log only.
-        console.warn("stop before start failed:", err);
-      }
+      // One command, not two. Stopping first and then starting looked
+      // necessary, but the actor already purges the engine before it speaks, so
+      // the separate stop was a second purge with a round trip in between -
+      // during which a click and the auto-advance could both be in flight and
+      // interleave into purge/speak/purge/speak on the speech engine. Keeping
+      // the whole transition inside the actor also means it is serialised with
+      // the ticks that drive it.
       try {
         await ipc.speakBookChapter(args);
       } catch (err) {
@@ -217,13 +207,20 @@ export function usePlayback(
   const estimatedTotalMs = snapshot
     ? estimateDurationMs(snapshot.total_chars, snapshot.rate)
     : 0;
+  const source = snapshot?.source;
+  const playbackKey =
+    source === null || source === undefined
+      ? "none"
+      : `${source.kind}:${"book_id" in source ? source.book_id : ""}:${
+          "chapter_index" in source ? (source.chapter_index ?? "") : ""
+        }:${snapshot?.start_char ?? 0}:${snapshot?.total_chars ?? 0}`;
 
   return {
     snapshot,
     status,
     progressPercent,
     estimatedTotalMs,
-    elapsedMs,
+    playbackKey,
     rate,
     isPlaying,
     isPaused,
