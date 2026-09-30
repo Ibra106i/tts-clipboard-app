@@ -8,7 +8,7 @@ import { useCallback, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePlayback } from "../hooks/usePlayback";
 import { describeError } from "../lib/errors";
-import { formatTime } from "../lib/format";
+import { ElapsedClock } from "./ElapsedClock";
 import { Toast } from "./Toast";
 import { useToast } from "../hooks/useToast";
 
@@ -92,9 +92,11 @@ export function Overlay() {
           style={{ width: `${playback.progressPercent}%` }}
         />
       </div>
-      <div className="time-display">
-        {formatTime(playback.elapsedMs)} / {formatTime(playback.estimatedTotalMs)}
-      </div>
+      <ElapsedClock
+        playing={playback.isPlaying}
+        resetKey={playback.playbackKey}
+        totalMs={playback.estimatedTotalMs}
+      />
     </div>
   );
 }
