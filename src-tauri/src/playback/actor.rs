@@ -31,6 +31,19 @@ const TICK: Duration = Duration::from_millis(250);
 /// freeze the UI thread forever.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Consecutive failed engine progress reads tolerated before the job is
+/// abandoned. At [`TICK`] this is a little over a second of continuous
+/// failure, which is long enough to ride out a transient audio-device change
+/// and short enough that a genuinely dead engine surfaces as a message rather
+/// than an indefinite freeze.
+const MAX_PROGRESS_READ_FAILURES: u32 = 5;
+
+/// Reported to the frontend when the engine stops answering. Phrased for the
+/// person reading it: they did nothing wrong, and the honest cause is that the
+/// audio device went away.
+pub const ENGINE_LOST_MESSAGE: &str = "The speech engine stopped responding. This usually means \
+     the audio device changed - plugging in headphones or switching output can cause it.";
+
 /// How the actor obtains its engine. Runs **on the playback thread**, which is
 /// what lets a COM engine be created and used in one apartment.
 pub type SpeakerFactory = Box<dyn FnOnce() -> AppResult<Box<dyn Speaker>> + Send>;
@@ -43,6 +56,13 @@ pub trait PlaybackEvents: Send + Sync + 'static {
     fn interrupted(&self, previous: &PlaybackSource, chapter_index: Option<usize>);
     /// The last chunk of a book chapter finished; the UI may advance.
     fn chapter_finished(&self, book_id: &str, chapter_index: usize, total_chapters: usize);
+
+    /// The speech engine stopped answering, so playback has been ended. The
+    /// actor cannot carry on, but it says so rather than leaving the window
+    /// showing a playhead that will never move.
+    fn engine_lost(&self, message: &str) {
+        let _ = message;
+    }
 }
 
 /// An events implementation that does nothing. Only useful in tests, where the
@@ -57,15 +77,47 @@ impl PlaybackEvents for NoEvents {
     fn interrupted(&self, _previous: &PlaybackSource, _chapter_index: Option<usize>) {}
 
     fn chapter_finished(&self, _book_id: &str, _chapter_index: usize, _total_chapters: usize) {}
+
+    fn engine_lost(&self, _message: &str) {}
 }
 
-enum Command {
+/// A request to the playback thread. Public because the command module builds
+/// them, but only [`dispatch`] and [`PlaybackHandle`] should send them.
+pub enum Command {
     Start(PlaybackJob, Sender<AppResult<()>>),
     PauseResume(Sender<AppResult<bool>>),
     SetRate(f32, Sender<AppResult<()>>),
     Stop(Sender<AppResult<()>>),
     Snapshot(Sender<AppResult<PlaybackSnapshot>>),
     Shutdown(Sender<AppResult<()>>),
+}
+
+/// Send `command` on `tx`, then wait for its answer on a blocking-pool thread.
+///
+/// This is what keeps a slow playback request off both the window thread and
+/// the async runtime's workers. Returns `None` only if the pool itself is gone.
+pub async fn dispatch<T>(
+    tx: Sender<Command>,
+    build: impl FnOnce(Sender<AppResult<T>>) -> Command + Send + 'static,
+) -> AppResult<T>
+where
+    T: Send + 'static,
+{
+    let (reply, rx) = channel();
+    // Sent here rather than inside the pool thread: this is a non-blocking
+    // enqueue, and doing it before the hand-off means the playback thread sees
+    // the request immediately instead of whenever the pool gets round to it.
+    let command = build(reply);
+    tx.send(command)
+        .map_err(|_| AppError::playback("the playback thread is no longer running"))?;
+    // Only the wait is moved off the caller. That is the part which can take
+    // seconds, and it is the part that must not sit on a runtime worker.
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(REPLY_TIMEOUT)
+            .map_err(|_| AppError::playback("the playback thread did not respond"))?
+    })
+    .await
+    .map_err(|_| AppError::playback("the playback request could not be queued"))?
 }
 
 /// The only handle other code gets to the playback thread.
@@ -128,27 +180,40 @@ impl PlaybackHandle {
             .map_err(|_| AppError::playback("the playback thread did not respond"))?
     }
 
+    /// A clone of the command channel, so a blocking wait can move off the
+    /// caller's thread. See [`Command::await_reply`].
+    pub fn sender(&self) -> Sender<Command> {
+        self.tx.clone()
+    }
+
     pub fn start(&self, job: PlaybackJob) -> AppResult<()> {
         let (reply, rx) = channel();
         self.send(Command::Start(job, reply), rx)
     }
 
+    // The synchronous siblings below are for tests and for the hotkey handler,
+    // which already runs off the window thread. The Tauri commands go through
+    // `dispatch` instead, so a slow engine cannot freeze the UI.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn pause_resume(&self) -> AppResult<bool> {
         let (reply, rx) = channel();
         self.send(Command::PauseResume(reply), rx)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_rate(&self, rate: f32) -> AppResult<()> {
         let (reply, rx) = channel();
         self.send(Command::SetRate(rate, reply), rx)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stop(&self) -> AppResult<()> {
         let (reply, rx) = channel();
         self.send(Command::Stop(reply), rx)
     }
 
     /// Read playback state. Purely observational - this never mutates anything.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn snapshot(&self) -> AppResult<PlaybackSnapshot> {
         let (reply, rx) = channel();
         self.send(Command::Snapshot(reply), rx)
@@ -176,6 +241,9 @@ fn run(mut speaker: Box<dyn Speaker>, events: Arc<dyn PlaybackEvents>, rx: Recei
     // often than once per tick - which is exactly what a polling reader does, so
     // playback would stall mid-job in production.
     let mut next_tick = Instant::now() + TICK;
+    // Consecutive engine progress read failures. Reset by any successful read
+    // or by any command that puts the actor back in a settled state.
+    let mut failed_reads = 0u32;
 
     loop {
         match rx.recv_timeout(TICK) {
@@ -190,9 +258,16 @@ fn run(mut speaker: Box<dyn Speaker>, events: Arc<dyn PlaybackEvents>, rx: Recei
 
         if Instant::now() >= next_tick {
             if !state.is_idle() {
-                tick(&mut state, &mut *speaker, &*events);
+                tick(&mut state, &mut *speaker, &*events, &mut failed_reads);
             }
-            next_tick = Instant::now() + TICK;
+            // Scheduled from the previous deadline rather than from now, so a
+            // slow tick does not push every later one back and the cadence
+            // cannot drift. The `checked_add` guard keeps a pathological stall
+            // from burying the deadline in the far future.
+            next_tick = next_tick
+                .checked_add(TICK)
+                .filter(|deadline| *deadline > Instant::now())
+                .unwrap_or_else(|| Instant::now() + TICK);
         }
     }
 
@@ -262,7 +337,12 @@ fn handle_command(
             });
         }
         Command::Snapshot(reply) => {
-            let offset = current_offset(state, speaker);
+            // No engine call. The tick is the only thing that polls the voice, so
+            // asking the engine here as well would put two callers on the same
+            // voice, cost a COM round trip per call, and - for any engine where
+            // a status read is not purely observational - steal the tick's view
+            // of progress. The offset is the one the tick last saw.
+            let offset = state.last_offset();
             let _ = reply.send(Ok(state.snapshot(offset)));
         }
         Command::Shutdown(reply) => {
@@ -301,7 +381,17 @@ fn start_job(
             events.snapshot(&state.snapshot(0));
             Ok(())
         }
-        Ok(false) => Ok(()),
+        Ok(false) => {
+            // A range with nothing speakable in it - an empty selection, or a
+            // click that landed on a blank line. Leaving the state as it is
+            // would report `playing` forever with no text and no snapshot, so
+            // the window would sit on a progress bar that never moves and never
+            // stop. Finish it as a no-op instead, and say so.
+            state.stop();
+            events.snapshot(&state.snapshot(0));
+            log::info!("nothing to read in \"{title}\"");
+            Ok(())
+        }
         Err(error) => {
             state.stop();
             events.snapshot(&state.snapshot(0));
@@ -320,29 +410,64 @@ fn queue_next_chunk(state: &mut PlaybackState, speaker: &mut dyn Speaker) -> App
     }
 }
 
-/// Engine offset inside the current chunk, or 0 when it cannot be read.
-fn current_offset(state: &PlaybackState, speaker: &mut dyn Speaker) -> u32 {
-    if state.is_idle() || !state.is_awaiting_engine() {
-        return 0;
-    }
-    speaker.progress().map(|p| p.offset_chars).unwrap_or(0)
-}
-
 /// Advance playback if the engine finished the queued chunk. Called from this
 /// thread only - the tick is the only thing in the program that moves playback
 /// forward on its own.
-fn tick(state: &mut PlaybackState, speaker: &mut dyn Speaker, events: &dyn PlaybackEvents) {
+fn tick(
+    state: &mut PlaybackState,
+    speaker: &mut dyn Speaker,
+    events: &dyn PlaybackEvents,
+    failed_reads: &mut u32,
+) {
     if !state.is_awaiting_engine() {
+        *failed_reads = 0;
+        return;
+    }
+
+    // A paused voice is not going to report anything useful, and polling it
+    // costs a COM round trip every tick for as long as the user leaves it
+    // paused.
+    if state.is_paused() {
         return;
     }
 
     let progress = match speaker.progress() {
-        Ok(progress) => progress,
+        Ok(progress) => {
+            *failed_reads = 0;
+            progress
+        }
         Err(error) => {
-            log::warn!("could not read engine progress: {error}");
+            // Returning here without advancing left `awaiting_engine` true
+            // forever, so every later tick re-read, failed and returned: the
+            // job was wedged at "playing" with no further snapshot, no error,
+            // and no way out but stopping it by hand. SAPI loses its default
+            // audio endpoint whenever another application claims it, so this
+            // is a reachable path and not a theoretical one.
+            //
+            // A single failure is transient enough to shrug off - an audio device
+            // can blink and come straight back. A run of them means the engine
+            // is gone, so the job is failed loudly instead.
+            *failed_reads += 1;
+            log::warn!("could not read engine progress ({failed_reads} in a row): {error}");
+            if *failed_reads >= MAX_PROGRESS_READ_FAILURES {
+                log::error!("the speech engine stopped responding; ending this playback");
+                state.stop();
+                events.snapshot(&state.snapshot(0));
+                events.engine_lost(ENGINE_LOST_MESSAGE);
+            }
             return;
         }
     };
+
+    // Silence is only evidence of completion once the engine has been observed
+    // speaking. `speak` is asynchronous and returns before SAPI has transitioned
+    // its running state, so a tick landing in that gap reads silence from a
+    // voice that has not started - and acting on it advances to the next chunk
+    // on top of the one just queued, which truncates or drops the speech.
+    state.observe_progress(!progress.is_silent(), progress.offset_chars);
+    if progress.is_silent() && !state.has_spoken() {
+        return;
+    }
 
     events.snapshot(&state.snapshot(progress.offset_chars));
 
@@ -462,12 +587,20 @@ pub mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::FakeSpeaker;
+    use super::testing::*;
     use super::*;
     use crate::playback::speaker::EngineProgress;
     use crate::playback::state::PlaybackStatus;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    fn handle(speaker: Arc<FakeSpeaker>) -> PlaybackHandle {
+    /// Every test double here is a `Arc<..>` whose `Speaker` impl is written for
+    /// the `Arc`, because the tests need to hold a handle to inspect it while the
+    /// actor owns the other half.
+    fn handle<S>(speaker: Arc<S>) -> PlaybackHandle
+    where
+        S: Send + Sync + 'static,
+        Arc<S>: Speaker,
+    {
         PlaybackHandle::spawn(
             Box::new(move || Ok(Box::new(speaker) as Box<dyn Speaker>)),
             Arc::new(NoEvents),
@@ -547,6 +680,150 @@ mod tests {
         let spoken = speaker.spoken_texts();
         assert_eq!(spoken.len(), 3, "every chunk should be spoken exactly once");
         assert_eq!(spoken.concat(), text);
+        handle.shutdown();
+    }
+
+    #[test]
+    fn an_engine_that_stops_answering_ends_playback_instead_of_wedging_it() {
+        // Every progress read fails from the first one onwards, as it would if
+        // the default audio device disappeared mid-chapter.
+        let speaker = DeafSpeaker::new();
+        let handle = handle(Arc::clone(&speaker));
+
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                "a sentence to read aloud",
+                None,
+            ))
+            .expect("start");
+
+        // The failure used to be swallowed: `tick` returned before advancing,
+        // so `awaiting_engine` stayed true forever, no further snapshot was
+        // emitted, and the window sat on a playhead that would never move with
+        // nothing to tell the user why. The text must still have been handed to
+        // the engine - the point is that it stopped, not that it never started.
+        assert_eq!(
+            speaker.chunks_spoken(),
+            1,
+            "the first chunk should be spoken"
+        );
+        assert!(
+            wait_until(|| {
+                handle
+                    .snapshot()
+                    .map(|s| s.status == PlaybackStatus::Idle)
+                    .unwrap_or(false)
+            }),
+            "a dead engine must not leave playback wedged at playing"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_dead_engine_is_reported_to_the_frontend_with_a_reason() {
+        // Recovering from a dead engine only helps if the person using the app
+        // finds out why the audio stopped. Silence would look like a hang.
+        #[derive(Default)]
+        struct Recorder {
+            messages: Mutex<Vec<String>>,
+        }
+
+        impl PlaybackEvents for Recorder {
+            fn snapshot(&self, _snapshot: &PlaybackSnapshot) {}
+            fn interrupted(&self, _previous: &PlaybackSource, _chapter: Option<usize>) {}
+            fn chapter_finished(&self, _b: &str, _c: usize, _t: usize) {}
+            fn engine_lost(&self, message: &str) {
+                if let Ok(mut m) = self.messages.lock() {
+                    m.push(message.to_string());
+                }
+            }
+        }
+
+        let speaker = DeafSpeaker::new();
+        let events = Arc::new(Recorder::default());
+        let recorder = Arc::clone(&events);
+        let handle = PlaybackHandle::spawn(
+            Box::new(move || Ok(Box::new(Arc::clone(&speaker)) as Box<dyn Speaker>)),
+            Arc::clone(&events) as Arc<dyn PlaybackEvents>,
+        )
+        .expect("actor starts");
+
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                "a sentence to read aloud",
+                None,
+            ))
+            .expect("start");
+
+        assert!(
+            wait_until(|| recorder
+                .messages
+                .lock()
+                .map(|m| !m.is_empty())
+                .unwrap_or(false)),
+            "the frontend should be told the engine was lost"
+        );
+        assert!(recorder
+            .messages
+            .lock()
+            .map(|m| m[0].contains("speech engine"))
+            .unwrap_or(false));
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_transient_progress_failure_does_not_end_playback() {
+        // One failed read is not a dead engine - an audio device can blink. The
+        // job has to survive it.
+        let speaker = FlakySpeaker::new(1);
+        let handle = handle(Arc::clone(&speaker));
+
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                "a sentence to read aloud",
+                None,
+            ))
+            .expect("start");
+
+        assert!(
+            wait_until(|| handle.snapshot().map(|s| s.finished).unwrap_or(false)),
+            "one unreadable progress report should not stop the chapter"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn silence_before_the_engine_starts_does_not_advance_the_chunk() {
+        // The engine reports silence for the first read after `speak`, which is
+        // what a real asynchronous queue can do in the window between the call
+        // returning and SAPI transitioning its running state. Treating that as
+        // completion speaks the next chunk on top of the one just queued.
+        let speaker = SilentUntilSpoken::new();
+        let handle = handle(Arc::clone(&speaker));
+
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                &"word ".repeat(30),
+                None,
+            ))
+            .expect("start");
+
+        // Let the actor run several ticks. Nothing may advance on the strength
+        // of silence alone.
+        std::thread::sleep(TICK * 3);
+        assert!(
+            speaker.chunks_spoken() <= 1,
+            "silence before the engine starts must not queue the next chunk, got {}",
+            speaker.chunks_spoken()
+        );
         handle.shutdown();
     }
 
@@ -676,6 +953,178 @@ mod tests {
                 running: false,
                 offset_chars: 0,
             })
+        }
+    }
+
+    /// Speaks normally but never answers a progress read - the shape of an
+    /// engine whose audio device has gone away underneath it.
+    struct DeafSpeaker {
+        spoken: Mutex<Vec<String>>,
+        progress_failures: AtomicU32,
+    }
+
+    impl DeafSpeaker {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                spoken: Mutex::new(Vec::new()),
+                progress_failures: AtomicU32::new(MAX_PROGRESS_READ_FAILURES),
+            })
+        }
+
+        fn chunks_spoken(&self) -> usize {
+            self.spoken.lock().map(|s| s.len()).unwrap_or(0)
+        }
+    }
+
+    impl Speaker for Arc<DeafSpeaker> {
+        fn speak(&mut self, text: &str) -> AppResult<()> {
+            let mut spoken = self
+                .spoken
+                .lock()
+                .map_err(|e| AppError::internal(format!("fake speaker lock: {e}")))?;
+            spoken.push(text.to_string());
+            Ok(())
+        }
+
+        fn purge(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn pause(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn resume(&mut self) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn set_rate(&mut self, _sapi_rate: i32) -> AppResult<()> {
+            Ok(())
+        }
+
+        fn progress(&mut self) -> AppResult<EngineProgress> {
+            let remaining =
+                self.progress_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                        count.checked_sub(1)
+                    });
+            if remaining.is_ok() {
+                Err(AppError::playback("the speech engine is not responding"))
+            } else {
+                Ok(EngineProgress {
+                    running: false,
+                    offset_chars: 0,
+                })
+            }
+        }
+    }
+
+    /// Fails its first `failures` progress reads and behaves like
+    /// [`FakeSpeaker`] afterwards.
+    struct FlakySpeaker {
+        inner: Arc<FakeSpeaker>,
+        failures: AtomicU32,
+    }
+
+    impl FlakySpeaker {
+        fn new(failures: u32) -> Arc<Self> {
+            Arc::new(Self {
+                inner: FakeSpeaker::new(),
+                failures: AtomicU32::new(failures),
+            })
+        }
+    }
+
+    impl Speaker for Arc<FlakySpeaker> {
+        fn speak(&mut self, text: &str) -> AppResult<()> {
+            Speaker::speak(&mut Arc::clone(&self.inner), text)
+        }
+
+        fn purge(&mut self) -> AppResult<()> {
+            Speaker::purge(&mut Arc::clone(&self.inner))
+        }
+
+        fn pause(&mut self) -> AppResult<()> {
+            Speaker::pause(&mut Arc::clone(&self.inner))
+        }
+
+        fn resume(&mut self) -> AppResult<()> {
+            Speaker::resume(&mut Arc::clone(&self.inner))
+        }
+
+        fn set_rate(&mut self, rate: i32) -> AppResult<()> {
+            Speaker::set_rate(&mut Arc::clone(&self.inner), rate)
+        }
+
+        fn progress(&mut self) -> AppResult<EngineProgress> {
+            if self
+                .failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                    count.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(AppError::playback("the audio device blinked"));
+            }
+            Speaker::progress(&mut Arc::clone(&self.inner))
+        }
+    }
+
+    /// Reports silence for every read until it has been observed running once
+    /// for the current chunk, then behaves like [`FakeSpeaker`]. This is what a
+    /// real asynchronous queue does in the window between `speak` returning and
+    /// the engine transitioning to its running state.
+    struct SilentUntilSpoken {
+        inner: Arc<FakeSpeaker>,
+        started: AtomicBool,
+    }
+
+    impl SilentUntilSpoken {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: FakeSpeaker::new(),
+                started: AtomicBool::new(false),
+            })
+        }
+
+        fn chunks_spoken(&self) -> usize {
+            self.inner.spoken_texts().len()
+        }
+    }
+
+    impl Speaker for Arc<SilentUntilSpoken> {
+        fn speak(&mut self, text: &str) -> AppResult<()> {
+            // Each new utterance has not been heard from yet.
+            self.started.store(false, Ordering::SeqCst);
+            Speaker::speak(&mut Arc::clone(&self.inner), text)
+        }
+
+        fn purge(&mut self) -> AppResult<()> {
+            self.started.store(false, Ordering::SeqCst);
+            Speaker::purge(&mut Arc::clone(&self.inner))
+        }
+
+        fn pause(&mut self) -> AppResult<()> {
+            Speaker::pause(&mut Arc::clone(&self.inner))
+        }
+
+        fn resume(&mut self) -> AppResult<()> {
+            Speaker::resume(&mut Arc::clone(&self.inner))
+        }
+
+        fn set_rate(&mut self, rate: i32) -> AppResult<()> {
+            Speaker::set_rate(&mut Arc::clone(&self.inner), rate)
+        }
+
+        fn progress(&mut self) -> AppResult<EngineProgress> {
+            if !self.started.load(Ordering::SeqCst) {
+                self.started.store(true, Ordering::SeqCst);
+                return Ok(EngineProgress {
+                    running: false,
+                    offset_chars: 0,
+                });
+            }
+            Speaker::progress(&mut Arc::clone(&self.inner))
         }
     }
 
