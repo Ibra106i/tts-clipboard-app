@@ -183,6 +183,13 @@ pub struct PlaybackState {
     completed_chars: u32,
     /// A chunk was queued and has not been accounted for as finished yet.
     awaiting_engine: bool,
+    /// The engine has been observed speaking at least once for the current
+    /// chunk. Silence only means "finished" once this is set: `speak` is
+    /// asynchronous, so a progress read taken immediately after it returns can
+    /// see a voice that has not started yet.
+    observed_speaking: bool,
+    /// Engine offset inside the current chunk as last reported by the tick.
+    last_offset: u32,
     rate: f32,
     finished: bool,
 }
@@ -195,6 +202,8 @@ impl Default for PlaybackState {
             current_chunk: 0,
             completed_chars: 0,
             awaiting_engine: false,
+            observed_speaking: false,
+            last_offset: 0,
             rate: DEFAULT_RATE,
             finished: false,
         }
@@ -219,6 +228,8 @@ impl PlaybackState {
         self.current_chunk = 0;
         self.completed_chars = 0;
         self.awaiting_engine = false;
+        self.observed_speaking = false;
+        self.last_offset = 0;
         self.finished = false;
     }
 
@@ -228,6 +239,8 @@ impl PlaybackState {
         self.current_chunk = 0;
         self.completed_chars = 0;
         self.awaiting_engine = false;
+        self.observed_speaking = false;
+        self.last_offset = 0;
         self.finished = false;
     }
 
@@ -286,6 +299,37 @@ impl PlaybackState {
         self.awaiting_engine
     }
 
+    /// True once playback has been paused. A paused voice will not report
+    /// progress, so the tick skips it rather than spending a COM call per
+    /// interval for as long as the user leaves it alone.
+    pub fn is_paused(&self) -> bool {
+        self.status == PlaybackStatus::Paused
+    }
+
+    /// True when the engine has been seen speaking during the current chunk.
+    /// Until it has, silence carries no information: the queue call is
+    /// asynchronous and the engine may simply not have started yet.
+    pub fn has_spoken(&self) -> bool {
+        self.observed_speaking
+    }
+
+    /// Record what the engine reported for the current chunk, so silence can
+    /// later be read as completion and on-demand snapshots do not have to ask
+    /// the engine themselves.
+    pub fn observe_progress(&mut self, running: bool, offset_in_chunk: u32) {
+        self.last_offset = self.clamp_offset(offset_in_chunk);
+        if running {
+            self.observed_speaking = true;
+        }
+    }
+
+    /// The engine's offset inside the current chunk as last reported by the
+    /// tick. Reading the engine from here instead would make every on-demand
+    /// snapshot a COM round trip competing with the tick for the same voice.
+    pub fn last_offset(&self) -> u32 {
+        self.last_offset
+    }
+
     /// Characters of the current chunk the engine has already spoken, clamped
     /// to that chunk so a stray engine value can never over-report.
     fn clamp_offset(&self, offset_in_chunk: u32) -> u32 {
@@ -320,6 +364,10 @@ impl PlaybackState {
         self.completed_chars = self.completed_chars.saturating_add(chunk.char_count as u32);
         self.current_chunk += 1;
         self.awaiting_engine = false;
+        // The next chunk has not started yet, so silence proves nothing about
+        // it until the engine is seen running again.
+        self.observed_speaking = false;
+        self.last_offset = 0;
 
         let has_more = self.current_chunk < job.chunks.len();
         if !has_more {
