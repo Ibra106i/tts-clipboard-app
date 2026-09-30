@@ -79,15 +79,24 @@ impl Speaker for SapiSpeaker {
         }
     }
 
-    /// An empty string with no flags tells SAPI to stop immediately and drop
-    /// anything queued.
+    /// Drop everything queued and stop the voice.
+    ///
+    /// A NULL text pointer with `SPF_PURGEBEFORESPEAK`, which is the documented
+    /// way to empty the input queue. The previous version passed an *empty
+    /// string* instead, which is the interrupt-the-current-utterance idiom and
+    /// does not clear the queue: text already queued kept being spoken and the
+    /// voice stayed in a running state after the caller believed it had
+    /// stopped. That is how a "stopped" reader went on talking, and it is why a
+    /// stop immediately followed by a new `Speak` could land on top of an
+    /// utterance that was never actually cleared.
     fn purge(&mut self) -> AppResult<()> {
-        // SAFETY: same-thread use of an owned interface pointer.
+        // SAFETY: same-thread use of an owned interface pointer. A null text
+        // pointer is what makes this a purge rather than an utterance.
         unsafe {
             self.voice
                 .Speak(
-                    &windows::core::HSTRING::default(),
-                    0,
+                    windows::core::PCWSTR::null(),
+                    SPF_PURGEBEFORESPEAK.0 as u32,
                     Some(std::ptr::null_mut()),
                 )
                 .map_err(|e| AppError::playback(format!("speech could not be stopped ({e})")))
@@ -123,12 +132,18 @@ impl Speaker for SapiSpeaker {
 
     fn progress(&mut self) -> AppResult<EngineProgress> {
         // SAFETY: same-thread use of an owned interface pointer; the out
-        // parameters are stack locals that outlive the call.
+        // parameter is a stack local that outlives the call.
+        //
+        // The bookmark out-parameter is passed as a null pointer on purpose.
+        // SAPI allocates a bookmark string into it with `CoTaskMemAlloc` and
+        // hands ownership to the caller; this code never reads that string, so
+        // asking for it only to leak it was a COM allocation per call, four
+        // times a second, for the life of the process - seven thousand of them
+        // over a half-hour chapter, growing without bound.
         unsafe {
             let mut status = SPVOICESTATUS::default();
-            let mut bookmark = windows::core::PWSTR::null();
             self.voice
-                .GetStatus(&mut status, &mut bookmark)
+                .GetStatus(&mut status, std::ptr::null_mut())
                 .map_err(|e| AppError::playback(format!("speech status unavailable ({e})")))?;
 
             Ok(EngineProgress {
