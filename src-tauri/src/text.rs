@@ -81,24 +81,55 @@ fn push_chunk(chunks: &mut Vec<Chunk>, text: &str, start_char: usize) {
 /// Whitespace-only input produces no chunks. `max_chars == 0` means "do not
 /// split" rather than an error.
 pub fn split_into_chunks(text: &str, max_chars: usize) -> Vec<Chunk> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    if max_chars == 0 || char_count(text) <= max_chars {
+    // Only a debug build reports this. It exists because the cost of splitting
+    // a chapter is a real part of the cost of starting one, and "the reader felt
+    // slow" is not something to argue with either way.
+    #[cfg(debug_assertions)]
+    let measured = {
+        let started = std::time::Instant::now();
+        let chunks = split_into_chunks_inner(text, max_chars);
+        log::debug!(
+            "chunked {} characters into {} chunks in {:?}",
+            text.chars().count(),
+            chunks.len(),
+            started.elapsed()
+        );
+        chunks
+    };
+    #[cfg(debug_assertions)]
+    return measured;
+    #[cfg(not(debug_assertions))]
+    split_into_chunks_inner(text, max_chars)
+}
+
+fn split_into_chunks_inner(text: &str, max_chars: usize) -> Vec<Chunk> {
+    // Counting up front also covers the empty case, so there is no separate
+    // guard for it: an empty string is zero characters, which never exceeds
+    // `max_chars`, and `push_chunk` drops the resulting empty chunk.
+    let total_chars = char_count(text);
+    if max_chars == 0 || total_chars <= max_chars {
         let mut single = Vec::new();
         push_chunk(&mut single, text, 0);
         return single;
     }
 
     let mut chunks = Vec::new();
-    // Character offset of `remaining` within the original `text`. Tracked
-    // incrementally so the cost stays proportional to the text length instead of
-    // re-counting from the start for every chunk.
+    // Character offset of `remaining` within the original `text`, and how many
+    // characters are left in it. Both are tracked incrementally.
+    //
+    // The previous version counted the entire remaining suffix again on every
+    // iteration while looking for the next boundary, which made chunking
+    // quadratic in the chapter length: N^2/2C character decodings, so a
+    // 500,000-character chapter decoded 62.5 million characters - on the
+    // caller's thread, before the first word was spoken. Boundary search is
+    // now bounded by `max_chars` and the whitespace run it trims, so the whole
+    // pass is linear in the text.
     let mut consumed_chars = 0usize;
+    let mut remaining_chars = total_chars;
     let mut remaining = text;
 
     loop {
-        if char_count(remaining) <= max_chars {
+        if remaining_chars <= max_chars {
             push_chunk(&mut chunks, remaining, consumed_chars);
             break;
         }
@@ -117,11 +148,21 @@ pub fn split_into_chunks(text: &str, max_chars: usize) -> Vec<Chunk> {
             .unwrap_or(window_end);
 
         let taken = &remaining[..cut_at];
-        let rest = remaining[cut_at..].trim_start();
-        let dropped_whitespace = char_count(&remaining[cut_at..]) - char_count(rest);
+        let boundary = &remaining[cut_at..];
+        let rest = boundary.trim_start();
+        // Only the whitespace `trim_start` removed is counted, and that is a
+        // short run at the front of `boundary`. Counting `boundary` and `rest`
+        // in full - as this did - would put the whole remaining chapter back
+        // into every iteration.
+        //
+        // `trim_start` drops whole characters, so this offset is always a
+        // character boundary.
+        let dropped_whitespace = char_count(&boundary[..boundary.len() - rest.len()]);
 
         push_chunk(&mut chunks, taken, consumed_chars);
-        consumed_chars += char_count(taken) + dropped_whitespace;
+        let advanced = char_count(taken) + dropped_whitespace;
+        consumed_chars += advanced;
+        remaining_chars -= advanced;
         remaining = rest;
     }
 
@@ -417,6 +458,37 @@ mod tests {
             chunks.len()
         );
         assert_invariants(&text, CHUNK_CHARS, &chunks);
+    }
+
+    #[test]
+    fn chunking_a_very_long_chapter_is_linear_not_quadratic() {
+        // The cost this guards is character decoding, so the input is scaled
+        // well past any real chapter. Chunking must keep up with the input
+        // rather than falling away behind it: doubling the length should not
+        // quadruple the time. The budget is deliberately loose - it is there to
+        // catch a return to the quadratic walk, not to measure this machine.
+        let short = "The quick brown fox jumps over the lazy dog. ".repeat(2_000);
+        let long = "The quick brown fox jumps over the lazy dog. ".repeat(8_000);
+
+        let start = std::time::Instant::now();
+        let short_chunks = split_into_chunks(&short, CHUNK_CHARS);
+        let short_elapsed = start.elapsed();
+        assert!(!short_chunks.is_empty(), "the control input should chunk");
+
+        let start = std::time::Instant::now();
+        let long_chunks = split_into_chunks(&long, CHUNK_CHARS);
+        let long_elapsed = start.elapsed();
+
+        assert_invariants(&long, CHUNK_CHARS, &long_chunks);
+        // 4x the input must not cost more than ~16x the time, with slack for a
+        // loaded machine. The old implementation re-counted the remaining
+        // suffix per chunk and blew straight through this.
+        assert!(
+            long_elapsed < short_elapsed * 24,
+            "4x input took {:?} against {:?} for 1x - chunking is no longer linear",
+            long_elapsed,
+            short_elapsed
+        );
     }
 
     #[test]
