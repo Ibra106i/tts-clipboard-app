@@ -6,12 +6,21 @@ import {
   rangeToCharRange,
 } from "./offsets";
 
-/** A chapter-shaped container: one element per `split("\n")` segment. */
+/**
+ * A chapter-shaped container: one element per `split("\n")` segment, each
+ * carrying the `data-start-char` the reader renders it with.
+ *
+ * The attribute is part of the contract, not decoration - offset resolution
+ * reads it rather than accumulating over preceding siblings, so a fixture
+ * without it would be testing markup the app never renders.
+ */
 function renderChapter(text: string): HTMLElement {
   const container = document.createElement("div");
-  for (const paragraph of text.split("\n")) {
+  const starts = paragraphStarts(text);
+  for (const [index, paragraph] of text.split("\n").entries()) {
     const element = document.createElement("p");
     element.textContent = paragraph;
+    element.setAttribute("data-start-char", String(starts[index] ?? 0));
     container.appendChild(element);
   }
   return container;

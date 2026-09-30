@@ -38,6 +38,14 @@ export function codePointLength(value: string): number {
 }
 
 /**
+ * The attribute the reader renders each block's character offset into.
+ *
+ * It is part of the contract between the reader and this module: offsets are
+ * read from it rather than accumulated across preceding siblings.
+ */
+export const BLOCK_OFFSET_ATTR = "data-start-char";
+
+/**
  * Character offset of the start of each paragraph, for text rendered as one
  * element per `split("\n")` segment.
  *
@@ -52,7 +60,18 @@ export function codePointLength(value: string): number {
  * the caller to skip them.
  */
 export function paragraphStarts(chapterText: string): number[] {
-  const segments = chapterText.split("\n");
+  return paragraphStartsFrom(chapterText.split("\n"));
+}
+
+/**
+ * {@link paragraphStarts} for segments the caller already has.
+ *
+ * The reader splits the chapter to render it and needs the offsets for those
+ * same segments. Splitting again inside this function meant two full copies of
+ * the chapter's segment array per call, and this used to be called on every
+ * render - four times a second during playback.
+ */
+export function paragraphStartsFrom(segments: readonly string[]): number[] {
   const starts: number[] = [];
   let offset = 0;
 
@@ -94,17 +113,55 @@ export function pointToCharOffset(
   // segment, which means the newline characters are consumed by the split and
   // are **not in the DOM at all**. A walk over text nodes alone is therefore
   // short by one per paragraph and can never recover the chapter's offsets.
-  // Each block contributes its own text plus the separator it stands for.
-  let total = 0;
-  for (const block of Array.from(container.children)) {
-    if (!block.contains(targetNode)) {
-      total += codePointLength(block.textContent ?? "") + 1;
-      continue;
-    }
-    return total + offsetWithin(block, targetNode, targetOffset);
-  }
+  //
+  // The starting offset for the target block is read from its
+  // `data-start-char` attribute rather than accumulated from every preceding
+  // sibling. Accumulating meant a linear scan of the chapter - two of them per
+  // selection, since both endpoints need converting - each one calling
+  // `textContent` on every block, which builds a fresh string from every
+  // subtree in it. On a long chapter that was thousands of string allocations
+  // per click. The attribute is the same number, already computed.
+  const block = blockContaining(container, targetNode);
+  if (!block) return null;
 
-  return null;
+  const start = blockStart(block);
+  if (start === null) return null;
+
+  return start + offsetWithin(block, targetNode, targetOffset);
+}
+
+/**
+ * The nearest ancestor of `node` that is a chapter block, up to and including
+ * `container`.
+ *
+ * Climb from the node rather than scanning the container's children: the scan is
+ * linear in the number of blocks, which is the cost being removed. Climbing also
+ * tolerates the wrappers the reader puts around its paragraphs, and stopping at
+ * `container` keeps an unrelated node outside the chapter from resolving.
+ */
+function blockContaining(container: Element, targetNode: Node): Element | null {
+  let node: Node | null = targetNode;
+  while (node && node !== container) {
+    if (node instanceof Element && node.hasAttribute(BLOCK_OFFSET_ATTR)) {
+      return node;
+    }
+    node = node.parentNode;
+  }
+  return container instanceof Element && container.hasAttribute(BLOCK_OFFSET_ATTR)
+    ? container
+    : null;
+}
+
+/**
+ * The block's start offset, from the attribute the reader renders it with.
+ * `null` when the attribute is absent or unusable, which means the offsets
+ * would be guesses - better to report nothing than to read from the wrong place.
+ */
+function blockStart(block: Element): number | null {
+  const raw = block.getAttribute(BLOCK_OFFSET_ATTR);
+  if (raw === null) return null;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 /** Code-point offset of `targetNode` within the text of a single block. */
