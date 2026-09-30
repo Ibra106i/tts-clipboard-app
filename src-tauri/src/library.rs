@@ -338,7 +338,22 @@ pub fn get_book_chapters(book_id: &str, app_handle: &tauri::AppHandle) -> AppRes
         }
     };
 
-    books[index].chapters = Some(chapters.clone());
+    // The chapter *count* is cached here. The chapter *text* is not.
+    //
+    // Caching the text meant every book's entire contents were written into
+    // `library.json`, turning a metadata file into a document store: a handful
+    // of books produced a library file in the megabytes, and every
+    // `save_reading_position` - fired on each chapter change and on every Back
+    // click - had to read, parse, re-serialise and rewrite all of it to change
+    // two integers.
+    //
+    // The text stays where it belongs, in the source file next to the book, and
+    // is re-extracted on demand. That makes the first open of a book cost a
+    // parse (which it already did, to discover the chapters) and every later
+    // open cost the same parse - paid on the blocking pool, off the UI thread -
+    // in exchange for a library file that stays small no matter how long the
+    // books are.
+    books[index].chapters = None;
     books[index].total_chapters = chapters.len();
     write_library(app_handle, &books)?;
 
