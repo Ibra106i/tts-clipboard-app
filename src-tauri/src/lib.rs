@@ -351,7 +351,6 @@ impl playback::PlaybackEvents for PlaybackEventsSink {
         // payload, which already carries both fields.
         let _ = self.app.emit("playback-state", snapshot);
     }
-    }
 
     fn interrupted(&self, previous: &playback::PlaybackSource, chapter_index: Option<usize>) {
         let _ = self.app.emit(
