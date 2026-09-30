@@ -63,12 +63,31 @@ manual_let_else = "warn"
 redundant_clone = "warn"
 
 # Release builds optimise for size (a desktop utility ships faster and starts
-# faster when small) while keeping enough debug info for profiling crashes.
-# LTO and one codegen unit trade build time for runtime quality, which is the
-# right trade for a released binary that is built rarely.
+# faster when small). LTO and one codegen unit trade build time for runtime
+# quality, which is the right trade for a released binary built rarely.
+#
+# Debug info is kept deliberately, and this setting and the comment above it used
+# to contradict each other: the profile stripped symbols while claiming to keep
+# them "for profiling crashes". A backtrace without symbols is close to
+# useless, so `debug = 1` is set and stripping left to the installer. It costs
+# disk, not runtime.
+#
+# `panic` is set for the same reason. Aborting means any panic anywhere kills
+# the process with no unwinding, so the COM voice is never released, its
+# apartment is never torn down, and a staged import's temporary file is left
+# behind. Unwinding lets the actor's failure be a stopped playback instead of a
+# dead application, which is the difference between a recoverable fault and a
+# lost session.
 [profile.release]
 opt-level = "s"
 lto = "thin"
 codegen-units = 1
-strip = "symbols"
-panic = "abort"
+debug = 1
+panic = "unwind"
+
+# Debug builds are what a crash is diagnosed against, so they keep full debug
+# info and unwind too. The panic hook in `lib.rs` writes the backtrace into the
+# rotating log, and it can only do that if the frames resolve.
+[profile.dev]
+debug = 2
+panic = "unwind"
