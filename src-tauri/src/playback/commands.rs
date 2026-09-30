@@ -3,10 +3,20 @@
 //! These are thin, platform-agnostic adapters: they validate nothing, own
 //! nothing, and forward to the actor. Every one of them is either a pure read
 //! (`playback_get_state`) or an explicit request to change playback.
+//!
+//! All of them are `async`. Each one ends in a wait on the playback thread,
+//! which can take as long as `REPLY_TIMEOUT` when the engine is slow to answer.
+//! A plain `fn` command runs on the window's own thread, so every one of those
+//! waits froze the entire UI - worst of all `speak_book_chapter`, which also
+//! chunks the whole chapter before it even reaches the actor.
+//!
+//! `dispatch` builds the command on the caller's thread and moves only the wait
+//! onto the blocking pool, so a runtime worker is never parked for the duration
+//! and the expensive work happens on the playback thread, where the engine is.
 
 use crate::error::AppResult;
 use crate::models::TextRange;
-use crate::playback::actor::PlaybackHandle;
+use crate::playback::actor::{dispatch, PlaybackHandle};
 use crate::playback::state::{PlaybackJob, PlaybackSnapshot, PlaybackSource};
 use tauri::State;
 
@@ -39,8 +49,12 @@ fn chapter_job(
 }
 
 #[tauri::command]
-pub fn speak_text(text: String, playback: State<'_, PlaybackHandle>) -> AppResult<()> {
-    playback.start(clipboard_job(&text))
+pub async fn speak_text(text: String, playback: State<'_, PlaybackHandle>) -> AppResult<()> {
+    let job = clipboard_job(&text);
+    dispatch(playback.sender(), |reply| {
+        crate::playback::actor::Command::Start(job, reply)
+    })
+    .await
 }
 
 /// Read a chapter, or a span of it.
@@ -50,7 +64,7 @@ pub fn speak_text(text: String, playback: State<'_, PlaybackHandle>) -> AppResul
 /// selects a passage. Offsets are characters, and a span that no longer matches
 /// the text is clamped rather than rejected.
 #[tauri::command]
-pub fn speak_book_chapter(
+pub async fn speak_book_chapter(
     text: String,
     book_id: String,
     chapter_index: usize,
@@ -58,28 +72,35 @@ pub fn speak_book_chapter(
     range: Option<TextRange>,
     playback: State<'_, PlaybackHandle>,
 ) -> AppResult<()> {
-    playback.start(chapter_job(
-        book_id,
-        chapter_index,
-        total_chapters,
-        &text,
-        range,
-    ))
+    let job = chapter_job(book_id, chapter_index, total_chapters, &text, range);
+    dispatch(playback.sender(), |reply| {
+        crate::playback::actor::Command::Start(job, reply)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn pause_resume_tts(playback: State<'_, PlaybackHandle>) -> AppResult<bool> {
-    playback.pause_resume()
+pub async fn pause_resume_tts(playback: State<'_, PlaybackHandle>) -> AppResult<bool> {
+    dispatch(playback.sender(), |reply| {
+        crate::playback::actor::Command::PauseResume(reply)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn set_tts_rate(rate: f32, playback: State<'_, PlaybackHandle>) -> AppResult<()> {
-    playback.set_rate(rate)
+pub async fn set_tts_rate(rate: f32, playback: State<'_, PlaybackHandle>) -> AppResult<()> {
+    dispatch(playback.sender(), move |reply| {
+        crate::playback::actor::Command::SetRate(rate, reply)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn stop_tts(playback: State<'_, PlaybackHandle>) -> AppResult<()> {
-    playback.stop()
+pub async fn stop_tts(playback: State<'_, PlaybackHandle>) -> AppResult<()> {
+    dispatch(playback.sender(), |reply| {
+        crate::playback::actor::Command::Stop(reply)
+    })
+    .await
 }
 
 /// Current playback state. Purely observational.
@@ -93,6 +114,11 @@ pub fn stop_tts(playback: State<'_, PlaybackHandle>) -> AppResult<()> {
 /// chunk cursor as a side effect. Both are gone; the discriminated `source`
 /// carries the same information without parsing, and reading cannot mutate.
 #[tauri::command]
-pub fn playback_get_state(playback: State<'_, PlaybackHandle>) -> AppResult<PlaybackSnapshot> {
-    playback.snapshot()
+pub async fn playback_get_state(
+    playback: State<'_, PlaybackHandle>,
+) -> AppResult<PlaybackSnapshot> {
+    dispatch(playback.sender(), |reply| {
+        crate::playback::actor::Command::Snapshot(reply)
+    })
+    .await
 }
