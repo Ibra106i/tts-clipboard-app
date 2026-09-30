@@ -344,8 +344,7 @@ body {
 
 /* The offer to read a selected passage. It sits above the controls rather than
    over the text, so it never covers the words the user just pointed at. */
-.selection-pill {
-  display: flex;
+.selection-pill {  display: flex;
   align-items: center;
   gap: 12px;
   margin: 0 20px 8px;
@@ -419,15 +418,48 @@ body {
 .chapter-paragraph {
   margin-bottom: 1.2em;
   text-indent: 0;
-  /* Clicking a paragraph reads from it, so it needs to look clickable. The
-     hover state is the whole affordance: these are not buttons and are not
-     focusable, because a tab stop per paragraph would make a long chapter
-     unusable to navigate. */
-  cursor: pointer;
+  position: relative;
   border-left: 2px solid transparent;
   padding-left: 12px;
   margin-left: -14px;
   transition: border-color 0.15s ease, background-color 0.15s ease;
+  /* Lets the browser skip layout and paint for paragraphs that are scrolled
+     out of view. A long chapter is thousands of these, and they are laid out
+     even though only a screenful is ever seen. `contain-intrinsic-size` is what
+     lets it estimate their height without measuring them. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 3em;
+}
+
+/* The play target. It sits in the left gutter and is visible at rest, because
+   a hover-only affordance stays invisible until the user has already guessed
+   that hovering is meaningful. Dim until the paragraph is hovered. */
+.paragraph-play {
+  position: absolute;
+  left: -30px;
+  top: 0.1em;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  color: var(--color-accent-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0.35;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.chapter-paragraph:hover .paragraph-play,
+.paragraph-play:focus-visible {
+  opacity: 1;
+  background: var(--color-surface-hover);
+  border-color: var(--color-accent);
 }
 
 .chapter-paragraph:hover {
@@ -435,12 +467,29 @@ body {
   background-color: var(--color-surface);
 }
 
+/* The paragraph currently being spoken. Following this as it moves is what
+   makes a click's effect visible; without it the only feedback is audio. */
+.chapter-paragraph.is-reading {
+  border-left-color: var(--color-accent);
+  background-color: var(--color-surface);
+}
+
+.chapter-paragraph.is-reading .paragraph-play {
+  opacity: 1;
+  color: #ffffff;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.paragraph-body {
+  display: inline;
+}
+
 /* The parser separates blocks with a blank line and the reader splits on a
    single newline, so every block break renders an empty paragraph. It has
    nothing to read, so it must not look or behave like the paragraphs around
-   it ? and it must not add a margin that reads as a gap the user can click. */
+   it, and it must not add a margin that reads as a gap the user can click. */
 .chapter-paragraph:empty {
-  cursor: default;
   margin: 0;
   padding-left: 0;
   border-left-color: transparent;
