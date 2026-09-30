@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Video/marketing generation output (contains large media files)
+brag-output/
+
 # Rust build output and Tauri generated schemas
 dist/
 src-tauri/target/
