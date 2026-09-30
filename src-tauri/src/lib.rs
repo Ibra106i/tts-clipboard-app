@@ -18,6 +18,19 @@ const MAX_CLIPBOARD_CHARS: usize = 5000;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // A panic on a background thread - the playback actor especially - is
+    // otherwise only visible on stderr, which a developer console supplies and
+    // a packaged app does not. Routing it through `log` puts the message and
+    // its location in the same rotating file as everything else, so a crash
+    // report is a log the user can send rather than a blank window.
+    std::panic::set_hook(Box::new(|info| {
+        let where_ = info
+            .location()
+            .map_or_else(|| "unknown location".to_string(), |l| l.to_string());
+        log::error!("PANIC at {where_}: {info}");
+        log::error!("backtrace:\n{}", std::backtrace::Backtrace::force_capture());
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -27,24 +40,30 @@ pub fn run() {
             // Logging is always on, in debug and release. A release build with
             // no logs turned every recoverable failure into an unexplained
             // symptom for the user.
-            let level = if cfg!(debug_assertions) {
-                log::LevelFilter::Debug
-            } else {
-                log::LevelFilter::Info
-            };
-            app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(level)
-                    .targets([
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
-                            file_name: Some("tts-clipboard-app".into()),
-                        }),
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-                    ])
-                    .max_file_size(2_000_000)
-                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
-                    .build(),
-            )?;
+            //
+            // The global floor is Info, and only this app's own crate is opened
+            // up to Debug. A global Debug floor looks harmless but is not: a
+            // single PDF import emitted 1202 `lopdf` lines, and the windowing
+            // layer chattered about event-loop redraws on every frame. Each of
+            // those is two synchronous writes - one to the log file, one to
+            // stdout - landing on the thread that owns the window. 95% of a
+            // recent log was `lopdf`. Dependencies are held at Info so the app's
+            // own diagnostics stay available without a third-party crate being
+            // able to spend the UI thread's time.
+            let mut logging = tauri_plugin_log::Builder::default()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("tts-clipboard-app".into()),
+                    }),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                ])
+                .max_file_size(2_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3));
+            if cfg!(debug_assertions) {
+                logging = logging.level_for("app_lib", log::LevelFilter::Debug);
+            }
+            app.handle().plugin(logging.build())?;
             log::info!(
                 "starting {} v{} ({})",
                 app.package_info().name,
@@ -320,14 +339,17 @@ impl playback::PlaybackEvents for PlaybackEventsSink {
     fn snapshot(&self, snapshot: &playback::PlaybackSnapshot) {
         // Fired on every state change and a few times a second while speaking.
         // This is what replaced the 100 ms polling loop in the frontend.
+        // Fired on every state change and a few times a second while speaking.
+        // This is what replaced the 100 ms polling loop in the frontend.
+        //
+        // There is deliberately only this one event. A second channel,
+        // `playback-progress`, used to be emitted alongside it carrying
+        // `spoken_chars` and `total_chars` - four times a second, forever, to no
+        // listener anywhere in the app. It cost a `serde_json::Value`
+        // allocation, a serialisation and a webview message dispatch per tick to
+        // deliver nothing. Anything that wants progress reads it off this
+        // payload, which already carries both fields.
         let _ = self.app.emit("playback-state", snapshot);
-        let _ = self.app.emit(
-            "playback-progress",
-            serde_json::json!({
-                "spoken_chars": snapshot.spoken_chars,
-                "total_chars": snapshot.total_chars,
-            }),
-        );
     }
 
     fn interrupted(&self, previous: &playback::PlaybackSource, chapter_index: Option<usize>) {
@@ -352,6 +374,16 @@ impl playback::PlaybackEvents for PlaybackEventsSink {
                 "chapter_index": chapter_index,
                 "total_chapters": total_chapters,
             }),
+        );
+    }
+
+    fn engine_lost(&self, message: &str) {
+        // The window needs both halves: the state change that has already been
+        // emitted stops the playhead, and this says why it stopped. Without a
+        // reason, silence is indistinguishable from a hang.
+        let _ = self.app.emit(
+            "playback-engine-lost",
+            serde_json::json!({ "message": message }),
         );
     }
 }
@@ -459,16 +491,27 @@ async fn cmd_import_book(file_path: String, app: tauri::AppHandle) -> AppResult<
 
 #[tauri::command]
 async fn cmd_get_library(app: tauri::AppHandle) -> AppResult<Vec<models::Book>> {
-    let result = library::get_library(&app);
+    // Blocking file read, and the library can be large. Off the runtime worker.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = library::get_library(&app);
+        log::debug!("get library took {:?}", started.elapsed());
+        result
+    })
+    .await
+    .map_err(|_| AppError::internal("the library read could not be queued"))?;
     log_result("get library", &result);
     result
 }
 
 #[tauri::command]
 async fn cmd_delete_book(book_id: String, app: tauri::AppHandle) -> AppResult<()> {
-    let result = library::delete_book(&book_id, &app);
+    let log_id = book_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || library::delete_book(&book_id, &app))
+        .await
+        .map_err(|_| AppError::internal("the delete could not be queued"))?;
     match &result {
-        Ok(()) => log::info!("deleted book {book_id}"),
+        Ok(()) => log::info!("deleted book {log_id}"),
         Err(error) => log::error!(
             "delete failed [{}] {} (detail: {:?})",
             error.code(),
@@ -484,8 +527,18 @@ async fn cmd_get_book_chapters(
     book_id: String,
     app: tauri::AppHandle,
 ) -> AppResult<Vec<models::Chapter>> {
-    let result = library::get_book_chapters(&book_id, &app);
-    log_result(&format!("get chapters for {book_id}"), &result);
+    // Reads the library file and, on a cache miss, re-parses the whole source
+    // book. Both are blocking, and this used to run inline on a runtime worker.
+    let label = format!("get chapters for {book_id}");
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let result = library::get_book_chapters(&book_id, &app);
+        log::debug!("get book chapters took {:?}", started.elapsed());
+        result
+    })
+    .await
+    .map_err(|_| AppError::internal("the chapter request could not be queued"))?;
+    log_result(&label, &result);
     result
 }
 
@@ -496,7 +549,13 @@ async fn cmd_save_reading_position(
     position: usize,
     app: tauri::AppHandle,
 ) -> AppResult<()> {
-    let result = library::save_reading_position(&book_id, chapter, position, &app);
-    log_result(&format!("save position {book_id}/{chapter}"), &result);
+    // Read-modify-write of the library file. Blocking, and previously inline.
+    let label = format!("save position {book_id}/{chapter}");
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        library::save_reading_position(&book_id, chapter, position, &app)
+    })
+    .await
+    .map_err(|_| AppError::internal("the position save could not be queued"))?;
+    log_result(&label, &result);
     result
 }
