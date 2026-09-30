@@ -72,7 +72,7 @@ describe("ReaderView paragraph click", () => {
     idleBackend();
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    await userEvent.click(screen.getByText("Second block here."));
+    await userEvent.click(playFor("Second block here."));
 
     await waitFor(() => {
       expect(lastRead()).toMatchObject({ bookId: "b1", chapterIndex: 0 });
@@ -86,38 +86,91 @@ describe("ReaderView paragraph click", () => {
     // second block must count it once.
     renderReader([chapter(0, "a👍b\nsecond")]);
 
-    await userEvent.click(screen.getByText("second"));
+    await userEvent.click(playFor("second"));
 
     await waitFor(() => {
       expect(lastRead().range).toEqual({ start: 4, align_to_sentence: true });
     });
   });
 
-  it("stops playback before reading from the new position", async () => {
+  it("replaces what is playing with a single command, not a stop then a start", async () => {
     idleBackend();
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    await userEvent.click(screen.getByText("Second block here."));
+    await userEvent.click(playFor("Second block here."));
 
     await waitFor(() => {
       expect(harness.callsFor("speak_book_chapter")).toHaveLength(1);
     });
     // A click while something is already playing is a jump, not a second
-    // overlapping read, so the stop has to happen first.
-    expect(harness.callsFor("stop_tts").length).toBeGreaterThan(0);
+    // overlapping read. The backend purges the engine as part of starting, so a
+    // separate stop would only add a round trip in which a second start could
+    // interleave - which is how a stop and a start could land on the speech
+    // engine out of order.
+    expect(harness.callsFor("stop_tts")).toHaveLength(0);
+  });
+
+  it("renders no text of its own that the offset mapping would count", async () => {
+    idleBackend();
+    const content = "First block here.\n\nSecond block here.";
+    renderReader([chapter(0, content)]);
+
+    // The offset mapping walks the chapter's text nodes to answer "which
+    // character is this?". Anything the paragraph chrome adds as a text node -
+    // a glyph icon, a badge, a decoration - silently shifts every offset after
+    // it, so what is rendered has to match the source exactly.
+    const rendered = [...document.querySelectorAll(".chapter-paragraph")]
+      .map((block) => block.textContent)
+      .join("\n");
+    expect(rendered).toBe(content);
+  });
+
+  it("marks the paragraph being read so a click is visibly acknowledged", async () => {
+    harness.onAll({
+      playback_get_state: () => ({
+        status: "playing",
+        source: {
+          kind: "book",
+          book_id: "b1",
+          chapter_index: 0,
+          total_chapters: 1,
+        },
+        title: "Chapter 1",
+        text_preview: "",
+        // Three characters into the second block: the reader is in it.
+        spoken_chars: 3,
+        total_chars: 20,
+        start_char: 19,
+        rate: 1,
+        finished: false,
+      }),
+      stop_tts: () => undefined,
+      speak_book_chapter: () => undefined,
+      cmd_save_reading_position: () => undefined,
+    });
+    renderReader([chapter(0, TWO_BLOCKS)]);
+
+    // Audio alone is not evidence that a click did anything. The block the
+    // voice is currently on is marked, which is the visible half of the answer.
+    await waitFor(() => {
+      const reading = document.querySelectorAll(".chapter-paragraph.is-reading");
+      expect(reading).toHaveLength(1);
+      expect(reading[0]?.textContent).toBe("Second block here.");
+    });
   });
 
   it("does not read from the blank paragraph the parser leaves between blocks", async () => {
     idleBackend();
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    // The empty paragraph carries no text node to click, so the only way to
-    // reach it is the container. Clicking the text around it must still be the
-    // thing that starts a read, and the blank line must not start one.
+    // The empty paragraph carries no text to read, so it gets no play target
+    // at all. Clicking the paragraphs around it must still work, and the blank
+    // line must not start one.
     const blank = document.querySelectorAll(".chapter-paragraph")[1];
     expect(blank?.textContent).toBe("");
+    expect(blank?.querySelector(".paragraph-play")).toBeNull();
 
-    await userEvent.click(screen.getByText("First block here."));
+    await userEvent.click(playFor("First block here."));
     expect(lastRead().range).toEqual({ start: 0, align_to_sentence: true });
   });
 
@@ -176,6 +229,20 @@ function textContainer(): HTMLElement {
   const element = document.querySelector<HTMLElement>(".reader-content");
   if (!element) throw new Error("expected the reader text container");
   return element;
+}
+
+/**
+ * The gutter play button belonging to the paragraph holding `text`.
+ *
+ * The click target is the button, not the paragraph, so the tests address the
+ * affordance the user actually presses. Resolving it by locating the block
+ * that holds the text keeps these tests honest if paragraph numbering shifts.
+ */
+function playFor(text: string): HTMLElement {
+  const block = screen.getByText(text).closest(".chapter-paragraph");
+  const button = block?.querySelector<HTMLElement>(".paragraph-play");
+  if (!button) throw new Error(`expected a play target for "${text}"`);
+  return button;
 }
 
 /**
@@ -314,7 +381,7 @@ describe("ReaderView reading position", () => {
     });
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    await userEvent.click(screen.getByText("Second block here."));
+    await userEvent.click(playFor("Second block here."));
     await userEvent.click(screen.getByRole("button", { name: "← Library" }));
 
     await waitFor(() => {

@@ -1,12 +1,13 @@
 // The reader: chapter text, chapter selection and playback controls.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlayback } from "../hooks/usePlayback";
+import { Paragraph } from "./Paragraph";
 import { describeError } from "../lib/errors";
-import { formatTime } from "../lib/format";
+import { ElapsedClock } from "./ElapsedClock";
 import * as ipc from "../lib/ipc";
 import {
-  paragraphStarts,
+  paragraphStartsFrom,
   rangeToCharRange,
   type CharRange,
 } from "../lib/offsets";
@@ -130,13 +131,48 @@ export function ReaderView({
     (chapter) => chapter.index === currentChapterIdx,
   );
   const chapterText = currentChapter?.content ?? "";
-  // Derived rather than memoised on purpose: the React Compiler owns
-  // memoisation in this component, and hand-written `useMemo` around these
-  // values is what it refuses to preserve.
-  const paragraphs = chapterText.split("\n");
-  // The character offset of each rendered paragraph within the chapter. The
-  // backend measures in characters, so these are code-point offsets too.
-  const starts = paragraphStarts(chapterText);
+  // The chapter split into paragraphs, and the character offset of each within
+  // the chapter. The backend measures in characters, so these are code-point
+  // offsets too.
+  //
+  // Memoised on `chapterText` alone, deliberately: this depends on nothing but
+  // the text. It used to be recomputed on every render, and the backend pushes a
+  // snapshot four times a second while speaking, so a chapter was split twice
+  // and swept end to end through `codePointLength` four times a second -
+  // millions of loop iterations and megabytes of transient garbage a second on
+  // a long chapter, all of it thrown away before the next render.
+  //
+  // (An earlier comment here claimed the React Compiler owned memoisation in
+  // this component. It does not - it is not installed, so nothing was being
+  // memoised. These hooks are doing that work.)
+  const paragraphs = useMemo(() => chapterText.split("\n"), [chapterText]);
+  const starts = useMemo(() => paragraphStartsFrom(paragraphs), [paragraphs]);
+
+  // Reading from a paragraph reads the current chapter from that offset.
+  //
+  // `useCallback` here is load-bearing, not decoration. This is the only handler
+  // passed to the memoised `Paragraph`, so a fresh identity each render would
+  // fail every row's shallow comparison and rebuild the whole chapter on all
+  // four backend ticks a second - exactly what the row is there to prevent. The
+  // values it needs are therefore read through refs, which are updated as the
+  // chapter and its offsets change but do not change the handler's identity.
+  const latestRef = useRef({ chapter: currentChapter, paragraphs, starts });
+  useEffect(() => {
+    latestRef.current = { chapter: currentChapter, paragraphs, starts };
+  });
+  const handleParagraphClick = useCallback(
+    (index: number) => {
+      const { chapter, paragraphs: blocks, starts: offsets } = latestRef.current;
+      if (!chapter) return;
+      // A click that lands on whitespace between blocks has nothing to read.
+      if (!blocks[index]?.trim()) return;
+      void startChapter(chapter, {
+        start: offsets[index] ?? 0,
+        align_to_sentence: true,
+      });
+    },
+    [startChapter],
+  );
 
   // Which paragraph playback began in: the last one starting at or before the
   // offset the backend reports. Negative means it began at the top.
@@ -148,15 +184,28 @@ export function ReaderView({
   }
   if (startedAt <= 0) startParagraph = -1;
 
+  // Which paragraph is being read right now. `spoken_chars` counts from the
+  // start of the job, so the absolute position is that plus the job's own
+  // start. Following the highlight as it moves is what makes a click's effect
+  // visible: without it the only feedback is audio and a progress bar.
+  const readingAt = startedAt + (playback.snapshot?.spoken_chars ?? 0);
+  let readingParagraph = -1;
+  for (let index = 0; index < starts.length; index += 1) {
+    if ((starts[index] ?? 0) > readingAt) break;
+    readingParagraph = index;
+  }
+  const isReading =
+    playback.isPlaying || playback.isPaused ? readingParagraph : -1;
+
   // The span the user has selected, ready to be read on request. Null whenever
   // there is nothing to offer, which is the common case: most of the time the
   // caret is collapsed or the selection lives outside the chapter text.
   const [selected, setSelected] = useState<CharRange | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
 
-  // Plain functions rather than `useCallback`: the React Compiler owns
-  // memoisation in this component and refuses to preserve hand-written hooks
-  // over these values, so asking for one buys nothing and costs a lint error.
+  // Plain functions rather than `useCallback`, deliberately: none of these are
+  // passed to a memoised child, so wrapping them would only add dependency
+  // lists to maintain without changing what re-renders.
   const clearSelection = () => {
     setSelected(null);
     window.getSelection()?.removeAllRanges();
@@ -166,6 +215,13 @@ export function ReaderView({
     const container = contentRef.current;
     const selection = window.getSelection();
     if (!container || !selection || selection.rangeCount === 0) {
+      setSelected(null);
+      return;
+    }
+    // A click with no drag leaves a collapsed caret. There is nothing to read,
+    // and resolving offsets for it would walk the chapter for a result that is
+    // thrown away one line later - on every single click in the text.
+    if (selection.isCollapsed) {
       setSelected(null);
       return;
     }
@@ -204,31 +260,12 @@ export function ReaderView({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selected]);
 
-  // Plain function: it is only used as a click handler, and memoizing it would
-  // depend on a chapter object derived from props on every render.
   const handleSpeak = () => {
     if (!currentChapter) return;
     void startChapter(currentChapter);
   };
 
   // Clicking a paragraph reads from the sentence at or after its start.
-  //
-  // This is deliberately not a button. Making every paragraph focusable would
-  // put a tab stop on every block of every chapter, which makes the reader
-  // unusable by keyboard — a worse outcome than a convenience that only works
-  // with a mouse. Keyboard users already have the chapter select and the
-  // Speak Chapter button, both properly labelled, which reach every position
-  // this does.
-  const handleParagraphClick = (index: number) => {
-    if (!currentChapter) return;
-    // A click that lands on whitespace between blocks has nothing to read.
-    if (!paragraphs[index]?.trim()) return;
-    void startChapter(currentChapter, {
-      start: starts[index] ?? 0,
-      align_to_sentence: true,
-    });
-  };
-
   const handleBack = useCallback(async () => {
     autoAdvanceRef.current = false;
     await playback.stop();
@@ -301,23 +338,22 @@ export function ReaderView({
         </select>
       </header>
 
-      <div className="reader-content" ref={contentRef} onMouseUp={handleSelect}>
+      <div
+        className="reader-content"
+        ref={contentRef}
+        onMouseUp={handleSelect}
+      >
         {chapterText ? (
           <div className="chapter-text">
             {paragraphs.map((paragraph, i) => (
-              <p
+              <Paragraph
                 key={i}
-                className="chapter-paragraph"
-                // The offset is the paragraph's own position in the chapter, so
-                // the click asks the backend to read from here rather than
-                // slicing the text here and risking a unit mismatch.
-                data-start-char={starts[i] ?? 0}
-                onClick={
-                  paragraph.trim() ? () => handleParagraphClick(i) : undefined
-                }
-              >
-                {paragraph}
-              </p>
+                index={i}
+                text={paragraph}
+                startChar={starts[i] ?? 0}
+                isReading={isReading === i}
+                onReadFrom={handleParagraphClick}
+              />
             ))}
           </div>
         ) : (
@@ -386,9 +422,11 @@ export function ReaderView({
           style={{ width: `${playback.progressPercent}%` }}
         />
       </div>
-      <div className="time-display">
-        {formatTime(playback.elapsedMs)} / {formatTime(playback.estimatedTotalMs)}
-      </div>
+      <ElapsedClock
+        playing={playback.isPlaying}
+        resetKey={playback.playbackKey}
+        totalMs={playback.estimatedTotalMs}
+      />
     </div>
   );
 }
