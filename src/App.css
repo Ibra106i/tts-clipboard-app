@@ -908,3 +908,17 @@ select:focus-visible {
     forced-color-adjust: none;
   }
 }
+
+/* Belt and braces for the rest of the stylesheet: honouring reduced motion in
+   two places means a transition added later can reintroduce motion without
+   anyone noticing. Near-zero rather than none, because some engines treat a
+   zero-duration transition as no transition and skip the end state. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
