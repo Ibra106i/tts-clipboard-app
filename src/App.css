@@ -793,16 +793,16 @@ body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--bg-surface);
+  background: var(--bg-surface-active);
   color: var(--text-main);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-amber);
   padding: 10px 22px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: 0.82rem;
   font-weight: 500;
   z-index: 9999;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  animation: toast-in 0.2s ease;
+  animation: toast-in var(--transition-base) var(--ease-standard);
 }
 
 @keyframes toast-in {
@@ -816,11 +816,22 @@ body {
   }
 }
 
+/* A toast that slides in unprompted is motion nobody asked for. */
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
+
 /* ── Overlay ────────────────────────────────────────────────────── */
 
+/* The floating mini-player. Blurred so whatever sits behind it stays legible as
+   context, and warm rather than blue-black so it belongs to the palette instead
+   of looking like a different application. */
 .overlay-root {
-  background: #1a1a28;
-  border: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--bg-surface) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--accent-olive);
   border-radius: var(--radius-lg);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
   height: 100vh;
@@ -858,9 +869,42 @@ body {
   font-style: italic;
 }
 
-/* ── Keyboard focus visibility (accessibility) ───────────────────── */
+/* ── Keyboard focus (accessibility) ──────────────────────────────── */
+
+/* Amber at 9.91:1 against the app background. */
 button:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--accent-primary);
+  outline: 2px solid var(--border-focus);
   outline-offset: 2px;
+}
+
+/* Where the focused control is itself amber, an amber outline would sit on
+   amber and vanish. An ink ring separates the two without restyling the
+   control. */
+.btn-import:focus-visible,
+.btn-play:focus-visible,
+.btn-speak:focus-visible,
+.selection-pill-action:focus-visible {
+  outline-color: var(--text-ink);
+  box-shadow: 0 0 0 2px var(--border-focus);
+}
+
+/* ── Forced colors ────────────────────────────────────────────────── */
+
+/* Under a forced palette the app's own tokens are replaced by the user's, and
+   the decorative play button would disappear with them. */
+@media (forced-colors: active) {
+  .paragraph-play {
+    opacity: 1;
+    border-color: ButtonBorder;
+  }
+
+  /* forced-color-adjust is what lets these keep the system's Highlight pairing
+     instead of being flattened to a single colour. */
+  .chapter-paragraph.is-reading {
+    border-left-color: Highlight;
+    background-color: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
 }
