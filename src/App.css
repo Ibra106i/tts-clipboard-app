@@ -421,12 +421,15 @@ body {
   color: var(--text-muted);
   font-size: 0.82rem;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color var(--transition-fast) var(--ease-standard),
+    color var(--transition-fast) var(--ease-standard),
+    background-color var(--transition-fast) var(--ease-standard);
 }
 
 .btn-back:hover {
-  border-color: var(--accent-primary);
+  border-color: var(--border-amber);
   color: var(--text-main);
+  background: var(--bg-surface-hover);
 }
 
 .reader-title {
@@ -448,18 +451,20 @@ body {
 
 /* Where playback began, shown only when it did not begin at the top. */
 .chapter-counter-start {
-  color: var(--accent-secondary);
+  color: var(--text-accent);
+  font-weight: 600;
 }
 
 /* The offer to read a selected passage. It sits above the controls rather than
    over the text, so it never covers the words the user just pointed at. */
-.selection-pill {  display: flex;
+.selection-pill {
+  display: flex;
   align-items: center;
   gap: 12px;
   margin: 0 20px 8px;
   padding: 8px 10px 8px 14px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-active);
+  border: 1px solid var(--border-amber);
   border-radius: var(--radius-lg);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   flex-shrink: 0;
@@ -475,20 +480,25 @@ body {
 .selection-pill-action {
   padding: 6px 14px;
   background: var(--accent-primary);
-  color: #ffffff;
+  /* Amber is light; a white label here would measure 1.95:1. */
+  color: var(--text-ink);
   border: none;
   border-radius: var(--radius-sm);
   font-size: 0.82rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.15s ease;
+  transition: background-color var(--transition-fast) var(--ease-standard);
 }
 
 .selection-pill-action:hover {
-  background: var(--accent-secondary);
+  background: var(--accent-primary-hover);
 }
 
 
+/* The native select paints its own chrome, so background and border are what
+   make it match the rest of the header on Windows. `appearance: none` is
+   deliberately not set — the platform dropdown is more usable than a rebuilt
+   one, and this is not a control worth replacing. */
 .chapter-select {
   max-width: 260px;
   padding: 7px 12px;
@@ -498,11 +508,17 @@ body {
   color: var(--text-main);
   font-size: 0.82rem;
   cursor: pointer;
+  transition: border-color var(--transition-fast) var(--ease-standard);
 }
 
-.chapter-select:focus {
-  outline: none;
-  border-color: var(--accent-primary);
+/* `:focus-visible` rather than `:focus`, so a pointer click leaves no ring
+   behind while keyboard focus still shows one. The old `:focus` rule also
+   removed the outline entirely, which made the control unreachable visually for
+   a keyboard user. */
+.chapter-select:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+  border-color: var(--border-amber);
 }
 
 /* ── Reader Content ─────────────────────────────────────────────── */
