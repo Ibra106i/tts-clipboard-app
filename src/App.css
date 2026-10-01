@@ -243,14 +243,19 @@ body {
   border-radius: var(--radius-md);
   padding: 18px;
   cursor: pointer;
-  transition: all 0.15s ease;
   position: relative;
+  transition: border-color var(--transition-base) var(--ease-standard),
+    background-color var(--transition-base) var(--ease-standard),
+    box-shadow var(--transition-base) var(--ease-standard);
 }
 
+/* Hover lifts the border and warms the surface. The old lift was a 2px
+   translate, which moved the card's contents and made the delete button jump
+   under the pointer. */
 .book-card:hover {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 20px rgba(109, 93, 252, 0.15);
-  transform: translateY(-2px);
+  border-color: var(--border-amber);
+  background: var(--bg-surface-hover);
+  box-shadow: 0 2px 16px var(--accent-glow);
 }
 
 .book-card-header {
@@ -279,14 +284,18 @@ body {
   flex-shrink: 0;
 }
 
+/* The two file types are distinguished by hue, not lightness alone, so the
+   badge still reads for a colour-blind reader. PDF leans on the status red and
+   EPUB on a cool green — both clear of the amber ramp, so a badge is never
+   mistaken for the accent. */
 .badge-pdf {
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
+  background: var(--status-danger-bg);
+  color: var(--status-danger);
 }
 
 .badge-epub {
-  background: rgba(59, 130, 246, 0.15);
-  color: #60a5fa;
+  background: rgba(52, 211, 153, 0.14);
+  color: #6ee7b7;
 }
 
 .book-meta {
@@ -304,16 +313,22 @@ body {
 .book-progress-track {
   flex: 1;
   height: 4px;
-  background: var(--border-subtle);
+  /* Muted gold at low opacity, so a track reads as present-but-empty rather
+     than as a near-invisible hairline. */
+  background: color-mix(in srgb, var(--accent-muted) 20%, transparent);
   border-radius: 2px;
   overflow: hidden;
 }
 
 .book-progress-fill {
   height: 100%;
-  background: var(--accent-primary);
+  background: linear-gradient(
+    90deg,
+    var(--accent-primary),
+    var(--accent-secondary)
+  );
   border-radius: 2px;
-  transition: width 0.3s ease;
+  transition: width var(--transition-base) var(--ease-standard);
 }
 
 .book-progress-text {
@@ -323,32 +338,39 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* 28px rather than 24: this is a destructive control, and four pixels is the
+   difference between an easy target and a fiddly one. Still short of the 44px
+   touch guidance, which does not apply to a mouse-driven desktop app. */
 .btn-delete-book {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 24px;
-  height: 24px;
+  top: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-muted);
-  font-size: 1rem;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   opacity: 0;
-  transition: all 0.15s ease;
+  transition: opacity var(--transition-fast) var(--ease-standard),
+    background-color var(--transition-fast) var(--ease-standard),
+    color var(--transition-fast) var(--ease-standard);
 }
 
-.book-card:hover .btn-delete-book {
+/* Revealed on focus as well as hover: a control that only appears when the
+   pointer happens to be over the card is unreachable by keyboard. */
+.book-card:hover .btn-delete-book,
+.btn-delete-book:focus-visible {
   opacity: 1;
 }
 
 .btn-delete-book:hover {
   background: var(--status-danger);
-  color: #fff;
+  color: var(--text-ink);
 }
 
 /* The card's content is a real button so it is reachable by keyboard; these
@@ -368,7 +390,7 @@ body {
 }
 
 .book-open:focus-visible {
-  outline: 2px solid var(--accent-primary);
+  outline: 2px solid var(--border-focus);
   outline-offset: 4px;
   border-radius: var(--radius-sm);
 }
