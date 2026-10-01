@@ -1,18 +1,62 @@
+/*
+ * Design tokens. See DESIGN.md for the palette and the measured contrast
+ * ratios behind these values.
+ *
+ * Amber fills are light, so labels sitting on them are near-black
+ * (`--text-ink`). White on `--accent-primary` measures 1.95:1 and fails AA
+ * outright; ink on it measures 9.91:1.
+ */
 :root {
-  --color-bg: #0f0f13;
-  --color-surface: #16161d;
-  --color-surface-hover: #1e1e28;
-  --color-border: #2a2a36;
-  --color-accent: #6d5dfc;
-  --color-accent-glow: rgba(109, 93, 252, 0.35);
-  --color-accent-soft: #8b7dff;
-  --color-text: #e2e2e8;
-  --color-text-muted: #9a9aad;
-  --color-success: #4ade80;
-  --color-danger: #f43f5e;
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
+  /* Surface layers — dark slate with warm golden undertones */
+  --bg-app: #0f0e0a;
+  --bg-surface: #171510;
+  --bg-surface-hover: #221f17;
+  --bg-surface-active: #2e2a1f;
+
+  /* Borders and dividers */
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --border-strong: #3a3423;
+  --border-amber: rgba(204, 123, 0, 0.4);
+  --border-focus: #ffa700;
+
+  /* Primary accent */
+  --accent-primary: #ffa700;
+  --accent-primary-hover: #cc7b00;
+  --accent-secondary: #d0a800;
+  --accent-muted: #bf9a00;
+  --accent-olive: #9c7e00;
+  --accent-glow: rgba(255, 167, 0, 0.18);
+
+  /* Reading and highlight states */
+  --reader-active-bg: rgba(156, 126, 0, 0.18);
+  --reader-active-border: #ffa700;
+  --reader-hover-bg: rgba(255, 255, 255, 0.02);
+
+  /* Text */
+  --text-main: #fcfaf4;
+  --text-muted: #a39e8c;
+  --text-accent: #ffa700;
+  /* For labels sitting on an amber fill. */
+  --text-ink: #0f0e0a;
+
+  /* Status, kept clear of the amber ramp so an error is never mistaken for the
+     accent. */
+  --status-danger: #f87171;
+  --status-danger-bg: rgba(248, 113, 113, 0.14);
+  --status-success: #86efac;
+
+  /* Layout metrics */
+  --reader-max-width: 70ch;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* One duration and easing for every state change. A timing copied per element
+     is how a set of transitions stops feeling like one system. */
+  --transition-fast: 120ms;
+  --transition-base: 180ms;
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-serif: "Merriweather", "Georgia", "Times New Roman", serif;
   --font-mono: "JetBrains Mono", "Fira Code", monospace;
@@ -28,8 +72,8 @@
 
 body {
   font-family: var(--font-sans);
-  background: var(--color-bg);
-  color: var(--color-text);
+  background: var(--bg-app);
+  color: var(--text-main);
   overflow: hidden;
 }
 
@@ -37,7 +81,7 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: var(--color-bg);
+  background: var(--bg-app);
   position: relative;
 }
 
@@ -48,22 +92,22 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 20px 28px 16px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
 }
 
 .app-title {
   font-size: 1.4rem;
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: var(--color-text);
+  color: var(--text-main);
 }
 
 .btn-import {
   padding: 10px 22px;
   border: none;
   border-radius: var(--radius-sm);
-  background: var(--color-accent);
+  background: var(--accent-primary);
   color: #fff;
   font-size: 0.88rem;
   font-weight: 600;
@@ -72,8 +116,8 @@ body {
 }
 
 .btn-import:hover {
-  background: var(--color-accent-soft);
-  box-shadow: 0 0 16px var(--color-accent-glow);
+  background: var(--accent-secondary);
+  box-shadow: 0 0 16px var(--accent-glow);
 }
 
 /* ── Drop Zone Overlay ──────────────────────────────────────────── */
@@ -87,7 +131,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 3px dashed var(--color-accent);
+  border: 3px dashed var(--accent-primary);
   border-radius: var(--radius-lg);
   margin: 12px;
   pointer-events: none;
@@ -95,7 +139,7 @@ body {
 
 .drop-zone-content {
   text-align: center;
-  color: var(--color-accent-soft);
+  color: var(--accent-secondary);
   font-size: 1.1rem;
   font-weight: 600;
 }
@@ -119,7 +163,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
 }
 
 .empty-icon {
@@ -147,12 +191,12 @@ body {
   padding: 24px 28px;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
 .book-card {
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   padding: 18px;
   cursor: pointer;
@@ -161,7 +205,7 @@ body {
 }
 
 .book-card:hover {
-  border-color: var(--color-accent);
+  border-color: var(--accent-primary);
   box-shadow: 0 0 20px rgba(109, 93, 252, 0.15);
   transform: translateY(-2px);
 }
@@ -178,7 +222,7 @@ body {
   font-size: 0.95rem;
   font-weight: 600;
   line-height: 1.3;
-  color: var(--color-text);
+  color: var(--text-main);
   word-break: break-word;
 }
 
@@ -204,7 +248,7 @@ body {
 
 .book-meta {
   font-size: 0.8rem;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   margin-bottom: 12px;
 }
 
@@ -217,21 +261,21 @@ body {
 .book-progress-track {
   flex: 1;
   height: 4px;
-  background: var(--color-border);
+  background: var(--border-subtle);
   border-radius: 2px;
   overflow: hidden;
 }
 
 .book-progress-fill {
   height: 100%;
-  background: var(--color-accent);
+  background: var(--accent-primary);
   border-radius: 2px;
   transition: width 0.3s ease;
 }
 
 .book-progress-text {
   font-size: 0.72rem;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -245,7 +289,7 @@ body {
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 1rem;
   cursor: pointer;
   display: flex;
@@ -260,7 +304,7 @@ body {
 }
 
 .btn-delete-book:hover {
-  background: var(--color-danger);
+  background: var(--status-danger);
   color: #fff;
 }
 
@@ -281,7 +325,7 @@ body {
 }
 
 .book-open:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent-primary);
   outline-offset: 4px;
   border-radius: var(--radius-sm);
 }
@@ -299,31 +343,31 @@ body {
   align-items: center;
   gap: 16px;
   padding: 16px 24px;
-  border-bottom: 1px solid var(--color-border);
-  background: var(--color-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
   flex-shrink: 0;
 }
 
 .btn-back {
   padding: 7px 14px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 0.82rem;
   cursor: pointer;
   transition: all 0.15s ease;
 }
 
 .btn-back:hover {
-  border-color: var(--color-accent);
-  color: var(--color-text);
+  border-color: var(--accent-primary);
+  color: var(--text-main);
 }
 
 .reader-title {
   font-size: 0.9rem;
   font-weight: 600;
-  color: var(--color-text);
+  color: var(--text-main);
   flex: 1;
   white-space: nowrap;
   overflow: hidden;
@@ -332,14 +376,14 @@ body {
 
 .chapter-counter {
   font-size: 0.78rem;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
 /* Where playback began, shown only when it did not begin at the top. */
 .chapter-counter-start {
-  color: var(--color-accent-soft);
+  color: var(--accent-secondary);
 }
 
 /* The offer to read a selected passage. It sits above the controls rather than
@@ -349,8 +393,8 @@ body {
   gap: 12px;
   margin: 0 20px 8px;
   padding: 8px 10px 8px 14px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
   flex-shrink: 0;
@@ -358,14 +402,14 @@ body {
 
 .selection-pill-length {
   font-size: 0.78rem;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
 .selection-pill-action {
   padding: 6px 14px;
-  background: var(--color-accent);
+  background: var(--accent-primary);
   color: #ffffff;
   border: none;
   border-radius: var(--radius-sm);
@@ -376,24 +420,24 @@ body {
 }
 
 .selection-pill-action:hover {
-  background: var(--color-accent-soft);
+  background: var(--accent-secondary);
 }
 
 
 .chapter-select {
   max-width: 260px;
   padding: 7px 12px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
-  background: var(--color-bg);
-  color: var(--color-text);
+  background: var(--bg-app);
+  color: var(--text-main);
   font-size: 0.82rem;
   cursor: pointer;
 }
 
 .chapter-select:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--accent-primary);
 }
 
 /* ── Reader Content ─────────────────────────────────────────────── */
@@ -403,7 +447,7 @@ body {
   overflow-y: auto;
   padding: 32px 40px;
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
 .chapter-text {
@@ -412,7 +456,7 @@ body {
   font-family: var(--font-serif);
   font-size: 1.08rem;
   line-height: 1.85;
-  color: var(--color-text);
+  color: var(--text-main);
 }
 
 .chapter-paragraph {
@@ -446,7 +490,7 @@ body {
   padding: 0;
   font-size: 0.7rem;
   line-height: 1;
-  color: var(--color-accent-soft);
+  color: var(--accent-secondary);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -458,27 +502,27 @@ body {
 .chapter-paragraph:hover .paragraph-play,
 .paragraph-play:focus-visible {
   opacity: 1;
-  background: var(--color-surface-hover);
-  border-color: var(--color-accent);
+  background: var(--bg-surface-hover);
+  border-color: var(--accent-primary);
 }
 
 .chapter-paragraph:hover {
-  border-left-color: var(--color-accent);
-  background-color: var(--color-surface);
+  border-left-color: var(--accent-primary);
+  background-color: var(--bg-surface);
 }
 
 /* The paragraph currently being spoken. Following this as it moves is what
    makes a click's effect visible; without it the only feedback is audio. */
 .chapter-paragraph.is-reading {
-  border-left-color: var(--color-accent);
-  background-color: var(--color-surface);
+  border-left-color: var(--accent-primary);
+  background-color: var(--bg-surface);
 }
 
 .chapter-paragraph.is-reading .paragraph-play {
   opacity: 1;
   color: #ffffff;
-  background: var(--color-accent);
-  border-color: var(--color-accent);
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
 
 .paragraph-body {
@@ -504,7 +548,7 @@ body {
    renders as the browser's default opaque block, which is unreadable against
    the near-black surface. Selection is how a reader points at text to read. */
 .chapter-text ::selection {
-  background-color: var(--color-accent);
+  background-color: var(--accent-primary);
   color: #ffffff;
 }
 
@@ -533,32 +577,32 @@ body {
 
 .btn-speed {
   padding: 8px 14px;
-  background: var(--color-surface);
-  color: var(--color-accent-soft);
+  background: var(--bg-surface);
+  color: var(--accent-secondary);
   font-size: 0.82rem;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-subtle);
 }
 
 .btn-speed:hover {
-  background: var(--color-surface-hover);
-  border-color: var(--color-accent);
+  background: var(--bg-surface-hover);
+  border-color: var(--accent-primary);
 }
 
 .btn-play {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: var(--color-accent);
+  background: var(--accent-primary);
   color: #fff;
   font-size: 1.1rem;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 20px var(--color-accent-glow);
+  box-shadow: 0 0 20px var(--accent-glow);
 }
 
 .btn-play:hover {
-  background: var(--color-accent-soft);
+  background: var(--accent-secondary);
 }
 
 .btn-play:disabled {
@@ -570,25 +614,25 @@ body {
 .btn-close {
   padding: 8px 14px;
   background: transparent;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-size: 1.1rem;
 }
 
 .btn-close:hover {
-  color: var(--color-text);
-  background: var(--color-surface-hover);
+  color: var(--text-main);
+  background: var(--bg-surface-hover);
 }
 
 .btn-speak {
   padding: 10px 20px;
-  background: var(--color-accent);
+  background: var(--accent-primary);
   color: #fff;
   font-size: 0.85rem;
 }
 
 .btn-speak:hover {
-  background: var(--color-accent-soft);
-  box-shadow: 0 0 16px var(--color-accent-glow);
+  background: var(--accent-secondary);
+  box-shadow: 0 0 16px var(--accent-glow);
 }
 
 .btn-speak:disabled {
@@ -601,13 +645,13 @@ body {
 
 .progress-track {
   height: 3px;
-  background: var(--color-border);
+  background: var(--border-subtle);
   flex-shrink: 0;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--color-accent), var(--color-accent-soft));
+  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
   border-radius: 2px;
   transition: width 0.15s ease;
 }
@@ -616,7 +660,7 @@ body {
   padding: 6px 20px 10px;
   text-align: center;
   font-size: 0.72rem;
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
@@ -628,9 +672,9 @@ body {
   top: 16px;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--color-surface);
-  color: var(--color-text);
-  border: 1px solid var(--color-border);
+  background: var(--bg-surface);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
   padding: 10px 22px;
   border-radius: var(--radius-sm);
   font-size: 0.82rem;
@@ -655,7 +699,7 @@ body {
 
 .overlay-root {
   background: #1a1a28;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
   height: 100vh;
@@ -668,7 +712,7 @@ body {
 .drag-bar {
   height: 28px;
   width: 100%;
-  background: var(--color-surface);
+  background: var(--bg-surface);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   cursor: grab;
 }
@@ -683,19 +727,19 @@ body {
   overflow-y: auto;
   font-size: 0.9rem;
   line-height: 1.6;
-  color: var(--color-text);
+  color: var(--text-main);
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
 .placeholder {
-  color: var(--color-text-muted);
+  color: var(--text-muted);
   font-style: italic;
 }
 
 /* ── Keyboard focus visibility (accessibility) ───────────────────── */
 button:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent-primary);
   outline-offset: 2px;
 }
