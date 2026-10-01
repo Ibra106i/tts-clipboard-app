@@ -116,6 +116,9 @@ stray character inside a paragraph shifts every offset after it.
 Note the class name is `chapter-paragraph`, matching the component and its
 tests, rather than the `reader-paragraph` used in early drafts.
 
+`src/components/Icon.test.tsx` asserts that no icon contributes any text
+content, which is what would catch a future glyph icon reintroduced here.
+
 ## 4. Overlay Mini-Player
 
 - Background `#171510` with `backdrop-filter: blur(12px)` and a `#9c7e00` border.
