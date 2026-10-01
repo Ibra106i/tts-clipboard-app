@@ -86,6 +86,9 @@ light, so their label colour follows the fill rather than the theme.
 ### Typography and layout
 
 - Measure is fixed at `70ch`, centred, to hold the eye steady over a long session.
+  This replaced a `720px` measure, which was narrower on a large font and wider
+  on a small one ? so the line length moved with whatever the reader had chosen
+  system-wide, which is the opposite of what a fixed measure is for.
 - `line-height: 1.7`, `margin-bottom: 1.25rem` between paragraphs.
 
 ### Character-offset discipline
