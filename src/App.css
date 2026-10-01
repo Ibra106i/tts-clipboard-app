@@ -531,23 +531,34 @@ body {
   scrollbar-color: var(--border-subtle) transparent;
 }
 
+/* The measure is the single most important value in this file. 70ch holds the
+   return sweep steady across a long session; the previous 720px was narrower on
+   a large font and wider on a small one, so the line length moved with whatever
+   the reader had chosen system-wide. */
 .chapter-text {
-  max-width: 720px;
+  max-width: var(--reader-max-width);
   margin: 0 auto;
   font-family: var(--font-serif);
   font-size: 1.08rem;
-  line-height: 1.85;
+  line-height: 1.7;
   color: var(--text-main);
 }
 
 .chapter-paragraph {
-  margin-bottom: 1.2em;
+  margin-bottom: 1.25rem;
   text-indent: 0;
   position: relative;
-  border-left: 2px solid transparent;
-  padding-left: 12px;
-  margin-left: -14px;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  /* The gutter holding the play button. Transparent until hover or playback, so
+     a resting chapter shows no bar. */
+  border-left: 3px solid transparent;
+  padding-left: 1rem;
+  /* Pulls the left border back over the padding, so the active bar sits flush
+     with the text column rather than 19px further left. */
+  margin-left: calc(-1rem - 3px);
+  /* Compositor-friendly properties only. A transform here would run a transition
+     on every 250ms tick while audio plays. */
+  transition: border-color var(--transition-base) var(--ease-standard),
+    background-color var(--transition-base) var(--ease-standard);
   /* Lets the browser skip layout and paint for paragraphs that are scrolled
      out of view. A long chapter is thousands of these, and they are laid out
      even though only a screenful is ever seen. `contain-intrinsic-size` is what
@@ -559,49 +570,56 @@ body {
 /* The play target. It sits in the left gutter and is visible at rest, because
    a hover-only affordance stays invisible until the user has already guessed
    that hovering is meaningful. Dim until the paragraph is hovered. */
+/* The play target sits in the left gutter and is dim at rest rather than
+   hidden: an affordance that only appears on hover stays invisible until the
+   user has already guessed that hovering means something. */
 .paragraph-play {
   position: absolute;
   left: -30px;
-  top: 0.1em;
+  top: 0.15em;
   width: 22px;
   height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  font-size: 0.7rem;
-  line-height: 1;
   color: var(--accent-secondary);
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  opacity: 0.35;
-  transition: opacity 0.15s ease, background-color 0.15s ease;
+  opacity: 0.4;
+  transition: opacity var(--transition-fast) var(--ease-standard),
+    background-color var(--transition-fast) var(--ease-standard),
+    border-color var(--transition-fast) var(--ease-standard);
 }
 
 .chapter-paragraph:hover .paragraph-play,
 .paragraph-play:focus-visible {
   opacity: 1;
   background: var(--bg-surface-hover);
-  border-color: var(--accent-primary);
+  border-color: var(--border-amber);
 }
 
 .chapter-paragraph:hover {
-  border-left-color: var(--accent-primary);
-  background-color: var(--bg-surface);
+  border-left-color: var(--border-amber);
+  background-color: var(--reader-hover-bg);
 }
 
-/* The paragraph currently being spoken. Following this as it moves is what
-   makes a click's effect visible; without it the only feedback is audio. */
+/* The paragraph currently being spoken. Following this as it moves is what makes
+   a click's effect visible; without it the only feedback is audio.
+
+   The class carries the entire state. It adds, removes and wraps no child node,
+   because the reader resolves a click to a character offset by walking this
+   element's text nodes — a new node would shift every offset after it. */
 .chapter-paragraph.is-reading {
-  border-left-color: var(--accent-primary);
-  background-color: var(--bg-surface);
+  border-left-color: var(--reader-active-border);
+  background-color: var(--reader-active-bg);
 }
 
 .chapter-paragraph.is-reading .paragraph-play {
   opacity: 1;
-  color: #ffffff;
+  color: var(--text-ink);
   background: var(--accent-primary);
   border-color: var(--accent-primary);
 }
@@ -625,12 +643,12 @@ body {
   margin-bottom: 0;
 }
 
-/* There is no selection styling anywhere in the app, so a selected passage
-   renders as the browser's default opaque block, which is unreadable against
-   the near-black surface. Selection is how a reader points at text to read. */
+/* The browser's default selection is an opaque block that is unreadable against
+   a near-black surface. Selection is how a reader points at text to read, so it
+   has to be legible — amber with a near-black label, not amber with white. */
 .chapter-text ::selection {
   background-color: var(--accent-primary);
-  color: #ffffff;
+  color: var(--text-ink);
 }
 
 /* ── Controls (shared) ──────────────────────────────────────────── */
