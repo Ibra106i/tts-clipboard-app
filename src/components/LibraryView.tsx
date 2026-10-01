@@ -5,6 +5,7 @@ import { describeError } from "../lib/errors";
 import * as ipc from "../lib/ipc";
 import type { Book } from "../lib/types";
 import { formatPercent } from "../lib/format";
+import { Icon } from "./Icon";
 
 export interface LibraryViewProps {
   books: Book[];
@@ -58,13 +59,19 @@ export function LibraryView({
   return (
     <div className="app-root">
       <header className="app-header">
-        <h1 className="app-title">📚 TTS Library</h1>
+        {/* The icon is decorative beside a text label, so it is hidden from
+            assistive technology rather than announced. */}
+        <h1 className="app-title">
+          <Icon name="library" className="app-title-icon" />
+          TTS Library
+        </h1>
         <button
           type="button"
           className="btn-import"
           onClick={handleOpenFileDialog}
         >
-          + Import Book
+          <Icon name="import" />
+          Import Book
         </button>
       </header>
 
@@ -72,7 +79,7 @@ export function LibraryView({
         <div className="drop-zone">
           <div className="drop-zone-content">
             <div className="drop-icon" aria-hidden="true">
-              📥
+              <Icon name="import" size={40} />
             </div>
             <div>Drop PDF or EPUB files here</div>
           </div>
@@ -82,7 +89,7 @@ export function LibraryView({
       {books.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon" aria-hidden="true">
-            📖
+            <Icon name="book" size={40} />
           </div>
           <p>No books imported yet</p>
           <p className="empty-hint">
@@ -124,6 +131,7 @@ export function LibraryView({
                   </span>
                 </span>
               </button>
+              {/* Icon-only, so it carries its own accessible name. */}
               <button
                 type="button"
                 className="btn-delete-book"
@@ -131,7 +139,7 @@ export function LibraryView({
                 aria-label={`Delete ${book.title}`}
                 title="Delete book"
               >
-                ×
+                <Icon name="close" size={14} />
               </button>
             </li>
           ))}

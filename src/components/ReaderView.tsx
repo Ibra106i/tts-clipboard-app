@@ -5,6 +5,7 @@ import { usePlayback } from "../hooks/usePlayback";
 import { Paragraph } from "./Paragraph";
 import { describeError } from "../lib/errors";
 import { ElapsedClock } from "./ElapsedClock";
+import { Icon } from "./Icon";
 import * as ipc from "../lib/ipc";
 import {
   paragraphStartsFrom,
@@ -315,7 +316,8 @@ export function ReaderView({
     <div className="app-root">
       <header className="reader-header">
         <button type="button" className="btn-back" onClick={handleBack}>
-          ← Library
+          <Icon name="back" size={14} />
+          Library
         </button>
         <span className="reader-title">{book.title}</span>
         <span className="chapter-counter">
@@ -374,12 +376,15 @@ export function ReaderView({
             onClick={handleReadSelection}
             aria-label="Read this selection"
           >
-            🔊 Read this
+            <Icon name="speaker" size={14} />
+            Read this
           </button>
         </div>
       ) : null}
 
       <div className="reader-controls">
+        {/* Icon-only controls carry their accessible name through `title`; beside a
+            text label the icon is decorative and stays hidden. */}
         <button
           type="button"
           className="btn-speed"
@@ -397,7 +402,11 @@ export function ReaderView({
           aria-label={playback.isPaused ? "Resume" : "Pause"}
           title={playback.isPaused ? "Resume" : "Pause"}
         >
-          {playback.isPaused ? "▶" : "⏸"}
+          <Icon
+            name={playback.isPaused ? "play" : "pause"}
+            size={18}
+            title={playback.isPaused ? "Resume" : "Pause"}
+          />
         </button>
         <button
           type="button"
@@ -405,7 +414,8 @@ export function ReaderView({
           onClick={handleSpeak}
           disabled={!chapterText}
         >
-          🔊 Speak Chapter
+          <Icon name="speaker" />
+          Speak Chapter
         </button>
       </div>
 

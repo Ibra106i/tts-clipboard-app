@@ -178,7 +178,7 @@ describe("ReaderView paragraph click", () => {
     idleBackend();
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    await userEvent.click(screen.getByRole("button", { name: "🔊 Speak Chapter" }));
+    await userEvent.click(screen.getByRole("button", { name: "Speak Chapter" }));
 
     await waitFor(() => {
       expect(harness.callsFor("speak_book_chapter")).toHaveLength(1);
@@ -382,7 +382,7 @@ describe("ReaderView reading position", () => {
     renderReader([chapter(0, TWO_BLOCKS)]);
 
     await userEvent.click(playFor("Second block here."));
-    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+    await userEvent.click(screen.getByRole("button", { name: "Library" }));
 
     await waitFor(() => {
       const calls = harness.callsFor("cmd_save_reading_position");
@@ -404,8 +404,8 @@ describe("ReaderView reading position", () => {
     });
     renderReader([chapter(0, TWO_BLOCKS)]);
 
-    await userEvent.click(screen.getByRole("button", { name: "🔊 Speak Chapter" }));
-    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+    await userEvent.click(screen.getByRole("button", { name: "Speak Chapter" }));
+    await userEvent.click(screen.getByRole("button", { name: "Library" }));
 
     await waitFor(() => {
       const calls = harness.callsFor("cmd_save_reading_position");
@@ -422,7 +422,7 @@ describe("ReaderView reading position", () => {
     // The book record says the reader was 19 characters into chapter 0.
     renderReader([chapter(0, TWO_BLOCKS)], 0, 19);
 
-    await userEvent.click(screen.getByRole("button", { name: "← Library" }));
+    await userEvent.click(screen.getByRole("button", { name: "Library" }));
 
     await waitFor(() => {
       const calls = harness.callsFor("cmd_save_reading_position");

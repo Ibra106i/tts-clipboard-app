@@ -9,6 +9,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePlayback } from "../hooks/usePlayback";
 import { describeError } from "../lib/errors";
 import { ElapsedClock } from "./ElapsedClock";
+import { Icon } from "./Icon";
 import { Toast } from "./Toast";
 import { useToast } from "../hooks/useToast";
 
@@ -67,7 +68,11 @@ export function Overlay() {
           aria-label={playback.isPaused ? "Resume" : "Pause"}
           title={playback.isPaused ? "Resume" : "Pause"}
         >
-          {playback.isPaused ? "▶" : "⏸"}
+          <Icon
+            name={playback.isPaused ? "play" : "pause"}
+            size={18}
+            title={playback.isPaused ? "Resume" : "Pause"}
+          />
         </button>
         <button
           type="button"
@@ -76,7 +81,7 @@ export function Overlay() {
           aria-label="Close overlay"
           title="Close"
         >
-          ×
+          <Icon name="close" size={15} title="Close" />
         </button>
       </div>
       <div

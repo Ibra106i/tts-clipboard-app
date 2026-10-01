@@ -48,10 +48,11 @@ function ParagraphImpl({
         paragraph of every chapter and make a long one unusable to traverse. The
         chapter select and Speak Chapter remain the keyboard route to a position.
 
-        The icon is an SVG rather than a glyph character on purpose. A glyph
-        would be a text node inside the paragraph, and the offset mapping walks
-        the chapter's text nodes to answer "which character is this?" - a stray
-        character would shift every offset after it.
+        The icon must stay an SVG. A glyph character would be a text node inside
+        the paragraph, and the offset mapping walks the chapter's text nodes to
+        answer "which character is this?" - so one stray character shifts every
+        offset after it. A test asserts the paragraph's rendered text matches the
+        chapter exactly; an icon is why that test can pass.
       */}
       {speakable ? (
         <button
