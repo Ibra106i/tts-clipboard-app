@@ -123,7 +123,21 @@ tests, rather than the `reader-paragraph` used in early drafts.
   at 20% opacity.
 - Controls: `#ffa700` fill on hover, `--accent-primary-hover` while pressed.
 
-## 5. Performance & Render Integrity
+## 5. Accessibility
+
+Decisions that are part of the system rather than a later pass.
+
+| Decision | Why |
+|----------|-----|
+| Focus rings use ink on amber controls | An amber outline on an amber fill disappears ? exactly where a keyboard user most needs to see it. An ink ring with an amber outer ring separates the two. |
+| `:focus-visible`, not `:focus` | A pointer click leaves no ring behind; keyboard focus always does. The previous `:focus` rule removed the outline outright, leaving no visible indicator at all. |
+| Delete button appears on focus | A control revealed only on hover is unreachable by keyboard. |
+| Reduced-motion honoured | The drop bounce and toast slide are decorative. |
+| Forced-colors fallback | Under a forced palette the app's tokens are replaced by the user's, which otherwise left the play button invisible and the reading paragraph unstyled. |
+| Pressed states change colour, not geometry | A transform moves surrounding content and makes a button shift under the pointer. |
+| Status colours clear of the amber ramp | A red error must never be mistaken for the accent. |
+
+## 6. Performance & Render Integrity
 
 To stay smooth under the 250 ms state pushes from the Rust/SAPI thread:
 
