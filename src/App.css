@@ -663,6 +663,9 @@ body {
   flex-shrink: 0;
 }
 
+/* `transition: all` is avoided throughout: it animates properties the browser
+   may derive, which turns a colour change into a layout pass. Each control
+   names what it actually changes. */
 .btn-speed,
 .btn-play,
 .btn-close,
@@ -671,7 +674,11 @@ body {
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-weight: 600;
-  transition: all 0.15s ease;
+  transition: background-color var(--transition-fast) var(--ease-standard),
+    border-color var(--transition-fast) var(--ease-standard),
+    color var(--transition-fast) var(--ease-standard),
+    box-shadow var(--transition-fast) var(--ease-standard),
+    opacity var(--transition-fast) var(--ease-standard);
 }
 
 .btn-speed {
@@ -680,28 +687,38 @@ body {
   color: var(--accent-secondary);
   font-size: 0.82rem;
   border: 1px solid var(--border-subtle);
+  /* The rate is a number that changes four times a second; tabular figures stop
+     it shifting the button's contents as it goes. */
+  font-variant-numeric: tabular-nums;
 }
 
 .btn-speed:hover {
   background: var(--bg-surface-hover);
-  border-color: var(--accent-primary);
+  border-color: var(--border-amber);
+  color: var(--text-accent);
 }
 
+/* 44px, not merely large-looking: this is the reader's primary control and the
+   one someone reaches for mid-session without looking closely. */
 .btn-play {
   width: 44px;
   height: 44px;
   border-radius: 50%;
   background: var(--accent-primary);
-  color: #fff;
-  font-size: 1.1rem;
+  color: var(--text-ink);
   display: flex;
   align-items: center;
   justify-content: center;
   box-shadow: 0 0 20px var(--accent-glow);
 }
 
-.btn-play:hover {
-  background: var(--accent-secondary);
+.btn-play:hover:not(:disabled) {
+  background: var(--accent-primary-hover);
+}
+
+.btn-play:active:not(:disabled) {
+  background: var(--accent-olive);
+  box-shadow: none;
 }
 
 .btn-play:disabled {
@@ -725,12 +742,12 @@ body {
 .btn-speak {
   padding: 10px 20px;
   background: var(--accent-primary);
-  color: #fff;
+  color: var(--text-ink);
   font-size: 0.85rem;
 }
 
-.btn-speak:hover {
-  background: var(--accent-secondary);
+.btn-speak:hover:not(:disabled) {
+  background: var(--accent-primary-hover);
   box-shadow: 0 0 16px var(--accent-glow);
 }
 
@@ -744,15 +761,20 @@ body {
 
 .progress-track {
   height: 3px;
-  background: var(--border-subtle);
+  /* Muted gold at low opacity, so the track reads as present-but-empty against
+     the near-black background rather than as an invisible hairline. */
+  background: color-mix(in srgb, var(--accent-muted) 20%, transparent);
   flex-shrink: 0;
 }
 
 .progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
-  border-radius: 2px;
-  transition: width 0.15s ease;
+  background: linear-gradient(
+    90deg,
+    var(--accent-primary),
+    var(--accent-secondary)
+  );
+  transition: width var(--transition-fast) var(--ease-standard);
 }
 
 .time-display {
