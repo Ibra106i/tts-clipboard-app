@@ -42,6 +42,7 @@ sha2 = "^0.10"
 windows = { version = "0.61", features = [
     "Win32_Media_Speech",
     "Win32_System_Com",
+    "Win32_Media_Audio",
 ] }
 
 # Lints live here rather than in CI flags so `cargo clippy` locally enforces the

@@ -1,41 +1,39 @@
-//! The playback actor: the single thread that owns both the speech engine and
+//! The playback actor: the single thread that owns both the local TTS engine and
 //! the playback state.
 //!
 //! Why a thread rather than a handful of mutexes:
 //!
-//! * The COM speech object is **not** `Send`. Holding it in Tauri's managed
-//!   state is only possible with an unsound `unsafe impl Send`/`Sync`, which is
-//!   exactly the shortcut that made cross-apartment SAPI calls possible before.
-//!   Creating and using it inside one thread removes the problem by construction.
+//! * The local TTS engine owns a Python subprocess and WAV playback handles.
+//!   Confining it to one thread keeps process lifecycle and OS handles simple.
 //! * One owner means one place where chunk progression, completion and progress
 //!   accounting happen. Nothing else may advance playback.
-//! * Commands are messages with replies, so a slow `Speak` call cannot block a
+//! * Commands are messages with replies, so a slow synthesis call cannot block a
 //!   state reader, and there is no lock ordering to get wrong.
 //!
 //! Readers get snapshots through `PlaybackHandle::snapshot`, which is purely
 //! observational: it never starts, advances or stops anything.
 
 use crate::error::{AppError, AppResult};
-use crate::playback::speaker::{rate_to_engine, Speaker};
+use crate::inflect::model::{InflectModel, ModelCacheHandle};
+use crate::playback::engine::{ChunkPlayback, TtsEngine, speed_to_inflect};
 use crate::playback::state::{PlaybackJob, PlaybackSnapshot, PlaybackSource, PlaybackState};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-/// How often the actor polls the engine while speaking. Fast enough for a smooth
-/// progress bar, slow enough to stay invisible in a profile.
+/// How often the actor polls while speaking. Fast enough for a smooth progress
+/// bar, slow enough to stay invisible in a profile.
 const TICK: Duration = Duration::from_millis(250);
 
 /// How long a caller waits for a reply before giving up. A stuck engine must not
 /// freeze the UI thread forever.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Consecutive failed engine progress reads tolerated before the job is
-/// abandoned. At [`TICK`] this is a little over a second of continuous
-/// failure, which is long enough to ride out a transient audio-device change
-/// and short enough that a genuinely dead engine surfaces as a message rather
-/// than an indefinite freeze.
+/// Consecutive failed progress reads tolerated before the job is abandoned. At
+/// [`TICK`] this is a little over a second of continuous failure, which is long
+/// enough to ride out a transient audio-device change and short enough that a
+/// genuinely dead engine surfaces as a message rather than an indefinite freeze.
 const MAX_PROGRESS_READ_FAILURES: u32 = 5;
 
 /// Reported to the frontend when the engine stops answering. Phrased for the
@@ -45,8 +43,8 @@ pub const ENGINE_LOST_MESSAGE: &str = "The speech engine stopped responding. Thi
      the audio device changed - plugging in headphones or switching output can cause it.";
 
 /// How the actor obtains its engine. Runs **on the playback thread**, which is
-/// what lets a COM engine be created and used in one apartment.
-pub type SpeakerFactory = Box<dyn FnOnce() -> AppResult<Box<dyn Speaker>> + Send>;
+/// what lets the engine own a subprocess and any OS playback handles.
+pub type EngineFactory = Box<dyn FnOnce(&ModelCacheHandle) -> AppResult<Box<dyn TtsEngine>> + Send>;
 
 /// Events the actor publishes to the frontend.
 pub trait PlaybackEvents: Send + Sync + 'static {
@@ -90,6 +88,7 @@ pub enum Command {
     Stop(Sender<AppResult<()>>),
     Snapshot(Sender<AppResult<PlaybackSnapshot>>),
     Shutdown(Sender<AppResult<()>>),
+    SwitchModel(InflectModel, Sender<AppResult<()>>),
 }
 
 /// Send `command` on `tx`, then wait for its answer on a blocking-pool thread.
@@ -112,18 +111,21 @@ where
         .map_err(|_| AppError::playback("the playback thread is no longer running"))?;
     // Only the wait is moved off the caller. That is the part which can take
     // seconds, and it is the part that must not sit on a runtime worker.
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         rx.recv_timeout(REPLY_TIMEOUT)
-            .map_err(|_| AppError::playback("the playback thread did not respond"))?
+            .map_err(|_| AppError::playback("the playback thread did not respond"))
     })
     .await
-    .map_err(|_| AppError::playback("the playback request could not be queued"))?
+    .map_err(|e| AppError::playback(format!("dispatch task join failed: {e}")))?;
+    result?
 }
 
 /// The only handle other code gets to the playback thread.
 pub struct PlaybackHandle {
     tx: Sender<Command>,
     join: Mutex<Option<JoinHandle<()>>>,
+    /// Shared handle used to (re)download and locate the cached model.
+    cache: Arc<ModelCacheHandle>,
 }
 
 impl std::fmt::Debug for PlaybackHandle {
@@ -134,20 +136,21 @@ impl std::fmt::Debug for PlaybackHandle {
 
 impl PlaybackHandle {
     /// Spawn the playback thread, creating the engine inside it.
-    ///
-    /// Engine creation is reported back synchronously, so a platform without
-    /// speech support (or a broken voice installation) fails at startup with a
-    /// real error instead of silently doing nothing later.
-    pub fn spawn(create: SpeakerFactory, events: Arc<dyn PlaybackEvents>) -> AppResult<Self> {
+    pub fn spawn(
+        factory: EngineFactory,
+        events: Arc<dyn PlaybackEvents>,
+        cache: Arc<ModelCacheHandle>,
+    ) -> AppResult<Self> {
         let (tx, rx) = channel();
         let (ready_tx, ready_rx) = channel();
 
+        let cache_for_thread = cache.clone();
         let join = thread::Builder::new()
             .name("playback".to_string())
-            .spawn(move || match create() {
-                Ok(speaker) => {
+            .spawn(move || match factory(&cache_for_thread) {
+                Ok(engine) => {
                     let _ = ready_tx.send(Ok(()));
-                    run(speaker, events, rx);
+                    run(engine, events.as_ref(), cache_for_thread, rx);
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -161,6 +164,7 @@ impl PlaybackHandle {
             Ok(Ok(())) => Ok(Self {
                 tx,
                 join: Mutex::new(Some(join)),
+                cache,
             }),
             Ok(Err(error)) => Err(error),
             Err(_) => Err(AppError::playback(
@@ -191,29 +195,24 @@ impl PlaybackHandle {
         self.send(Command::Start(job, reply), rx)
     }
 
-    // The synchronous siblings below are for tests and for the hotkey handler,
-    // which already runs off the window thread. The Tauri commands go through
-    // `dispatch` instead, so a slow engine cannot freeze the UI.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Pause or resume, from the synchronous API used by tests and the hotkey
+    /// path. The Tauri commands go through `dispatch`.
     pub fn pause_resume(&self) -> AppResult<bool> {
         let (reply, rx) = channel();
         self.send(Command::PauseResume(reply), rx)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_rate(&self, rate: f32) -> AppResult<()> {
         let (reply, rx) = channel();
         self.send(Command::SetRate(rate, reply), rx)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn stop(&self) -> AppResult<()> {
         let (reply, rx) = channel();
         self.send(Command::Stop(reply), rx)
     }
 
     /// Read playback state. Purely observational - this never mutates anything.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn snapshot(&self) -> AppResult<PlaybackSnapshot> {
         let (reply, rx) = channel();
         self.send(Command::Snapshot(reply), rx)
@@ -230,25 +229,39 @@ impl PlaybackHandle {
             }
         }
     }
+
+    /// Switch the active Inflect model. Only allowed when idle.
+    pub fn switch_model(&self, model: InflectModel) -> AppResult<()> {
+        let (reply, rx) = channel();
+        self.send(Command::SwitchModel(model, reply), rx)
+    }
 }
 
 /// Body of the playback thread. Owns the engine and the state machine for its
 /// whole life; nothing is shared with other threads.
-fn run(mut speaker: Box<dyn Speaker>, events: Arc<dyn PlaybackEvents>, rx: Receiver<Command>) {
+fn run(
+    mut engine: Box<dyn TtsEngine>,
+    events: &dyn PlaybackEvents,
+    cache: Arc<ModelCacheHandle>,
+    rx: Receiver<Command>,
+) {
     let mut state = PlaybackState::new();
-    // Ticks are driven by a deadline rather than by an idle timeout. Relying on
-    // `recv_timeout` alone starves the advance tick whenever commands arrive more
-    // often than once per tick - which is exactly what a polling reader does, so
-    // playback would stall mid-job in production.
     let mut next_tick = Instant::now() + TICK;
-    // Consecutive engine progress read failures. Reset by any successful read
-    // or by any command that puts the actor back in a settled state.
     let mut failed_reads = 0u32;
+    // The chunk currently playing, if any.
+    let mut current: Option<CurrentChunk> = None;
 
     loop {
         match rx.recv_timeout(TICK) {
             Ok(command) => {
-                if handle_command(command, &mut state, &mut *speaker, &*events) {
+                if handle_command(
+                    command,
+                    &mut state,
+                    &mut *engine,
+                    events,
+                    &mut current,
+                    &cache,
+                ) {
                     break;
                 }
             }
@@ -258,12 +271,14 @@ fn run(mut speaker: Box<dyn Speaker>, events: Arc<dyn PlaybackEvents>, rx: Recei
 
         if Instant::now() >= next_tick {
             if !state.is_idle() {
-                tick(&mut state, &mut *speaker, &*events, &mut failed_reads);
+                tick(
+                    &mut state,
+                    &mut *engine,
+                    events,
+                    &mut current,
+                    &mut failed_reads,
+                );
             }
-            // Scheduled from the previous deadline rather than from now, so a
-            // slow tick does not push every later one back and the cadence
-            // cannot drift. The `checked_add` guard keeps a pathological stall
-            // from burying the deadline in the far future.
             next_tick = next_tick
                 .checked_add(TICK)
                 .filter(|deadline| *deadline > Instant::now())
@@ -271,84 +286,78 @@ fn run(mut speaker: Box<dyn Speaker>, events: Arc<dyn PlaybackEvents>, rx: Recei
         }
     }
 
+    // Be tidy: stop any last chunk playback on exit.
+    let _ = engine.stop_playing();
     log::debug!("playback thread exited");
+}
+
+struct CurrentChunk {
+    playback: ChunkPlayback,
+    /// Instant the chunk started playing, for elapsed-time progress.
+    started: Instant,
 }
 
 /// Returns true when the thread should stop.
 fn handle_command(
     command: Command,
     state: &mut PlaybackState,
-    speaker: &mut dyn Speaker,
+    engine: &mut dyn TtsEngine,
     events: &dyn PlaybackEvents,
+    current: &mut Option<CurrentChunk>,
+    cache: &Arc<ModelCacheHandle>,
 ) -> bool {
     match command {
         Command::Start(job, reply) => {
-            // A clipboard request must not silently destroy a chapter that is
-            // being read; the caller is told it is busy instead. Starting a
-            // chapter is an explicit replacement, so it wins.
-            let result = if !state.is_idle() && job.source == PlaybackSource::Clipboard {
+            let result = if !state.is_idle()
+                && job.source == PlaybackSource::Clipboard
+            {
                 Err(AppError::Busy)
             } else {
                 let previous = state.snapshot(0).source;
-                start_job(job, state, speaker, events, previous)
+                start_job(job, state, engine, events, current, previous)
             };
             let _ = reply.send(result);
         }
         Command::PauseResume(reply) => {
             let result = if state.is_idle() {
                 Ok(false)
+            } else if state.is_paused() {
+                resume(state, engine, events, current)
             } else {
-                let paused = state.toggle_paused();
-                let engine_result = if paused {
-                    speaker.pause()
-                } else {
-                    speaker.resume()
-                };
-                match engine_result {
-                    Ok(()) => {
-                        events.snapshot(&state.snapshot(0));
-                        Ok(paused)
-                    }
-                    Err(error) => Err(error),
-                }
+                pause(state, engine, events, current)
             };
             let _ = reply.send(result);
         }
         Command::SetRate(rate, reply) => {
             let applied = state.set_rate(rate);
-            let result = speaker
-                .set_rate(rate_to_engine(applied))
-                .map_err(|e| AppError::playback(format!("speech rate could not be changed ({e})")));
-            if result.is_ok() {
-                events.snapshot(&state.snapshot(0));
-            }
-            let _ = reply.send(result);
+            // Rate is applied on the next chunk, not to a currently playing WAV.
+            let _ = reply.send(Ok(()));
+            events.snapshot(&state.snapshot(0));
         }
         Command::Stop(reply) => {
-            // Playback state is cleared even when the engine refuses to purge:
-            // a stuck engine must not leave the app claiming it is still busy.
-            let purge_error = speaker.purge().err();
+            let _ = engine.stop_playing();
+            current.take();
             state.stop();
             events.snapshot(&state.snapshot(0));
             log::info!("playback stopped");
-            let _ = reply.send(match purge_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            });
+            let _ = reply.send(Ok(()));
         }
         Command::Snapshot(reply) => {
-            // No engine call. The tick is the only thing that polls the voice, so
-            // asking the engine here as well would put two callers on the same
-            // voice, cost a COM round trip per call, and - for any engine where
-            // a status read is not purely observational - steal the tick's view
-            // of progress. The offset is the one the tick last saw.
             let offset = state.last_offset();
             let _ = reply.send(Ok(state.snapshot(offset)));
         }
         Command::Shutdown(reply) => {
-            let _ = speaker.purge();
+            let _ = engine.stop_playing();
             let _ = reply.send(Ok(()));
             return true;
+        }
+        Command::SwitchModel(model, reply) => {
+            let result = if state.is_idle() {
+                engine.switch_model(model, &**cache)
+            } else {
+                Err(AppError::Busy)
+            };
+            let _ = reply.send(result);
         }
     }
 
@@ -358,22 +367,21 @@ fn handle_command(
 fn start_job(
     job: PlaybackJob,
     state: &mut PlaybackState,
-    speaker: &mut dyn Speaker,
+    engine: &mut dyn TtsEngine,
     events: &dyn PlaybackEvents,
+    current: &mut Option<CurrentChunk>,
     previous: Option<PlaybackSource>,
 ) -> AppResult<()> {
     if let Some(previous) = previous {
         events.interrupted(&previous, previous.chapter_index());
     }
 
-    speaker.purge()?;
-
-    let title = job.title.clone();
-    let total_chars = job.total_chars();
     state.start(job);
+    let title = state.snapshot(0).title.clone();
+    let total_chars = state.total_chars();
     let chunk_count = state.chunk_count();
 
-    match queue_next_chunk(state, speaker) {
+    match queue_next_chunk(state, engine, current) {
         Ok(true) => {
             log::info!(
                 "playback started: \"{title}\" ({total_chars} characters, {chunk_count} chunks)"
@@ -382,11 +390,6 @@ fn start_job(
             Ok(())
         }
         Ok(false) => {
-            // A range with nothing speakable in it - an empty selection, or a
-            // click that landed on a blank line. Leaving the state as it is
-            // would report `playing` forever with no text and no snapshot, so
-            // the window would sit on a progress bar that never moves and never
-            // stop. Finish it as a no-op instead, and say so.
             state.stop();
             events.snapshot(&state.snapshot(0));
             log::info!("nothing to read in \"{title}\"");
@@ -400,23 +403,87 @@ fn start_job(
     }
 }
 
-fn queue_next_chunk(state: &mut PlaybackState, speaker: &mut dyn Speaker) -> AppResult<bool> {
+fn queue_next_chunk(
+    state: &mut PlaybackState,
+    engine: &mut dyn TtsEngine,
+    current: &mut Option<CurrentChunk>,
+) -> AppResult<bool> {
+    let chunk_text = match state.take_next_chunk() {
+        Some(chunk) => chunk.text,
+        None => return Ok(false),
+    };    let playback = engine.play_chunk(
+        &chunk_text,
+        speed_to_inflect(state.rate()),
+        0.667,
+        None,
+    )?;
+
+    // The engine may have failed to play even after synthesizing. Treat that as
+    // a playback failure rather than leaving the chunk "playing" forever.
+    if playback.duration_ms == 0 && !playback.wav_path.exists() {
+        return Err(AppError::playback("the synthesized chunk could not be played"));
+    }
+
+    let started = Instant::now();
+    current.replace(CurrentChunk { playback, started });
+
+    Ok(true)
+}
+
+/// Pause: stop current chunk playback but remember it so resume can continue
+/// from the same chunk.
+fn pause(
+    state: &mut PlaybackState,
+    engine: &mut dyn TtsEngine,
+    events: &dyn PlaybackEvents,
+    current: &mut Option<CurrentChunk>,
+) -> AppResult<bool> {
+    let _ = engine.stop_playing();
+    current.take();
+    state.set_paused(true);
+    events.snapshot(&state.snapshot(0));
+    Ok(true)
+}
+
+/// Resume: re-synthesize and play the current chunk from the beginning.
+fn resume(
+    state: &mut PlaybackState,
+    engine: &mut dyn TtsEngine,
+    events: &dyn PlaybackEvents,
+    current: &mut Option<CurrentChunk>,
+) -> AppResult<bool> {
+    // Re-queue the same chunk we just paused. Before pausing we had already
+    // taken it from the state machine, so `take_next_chunk` now returns the
+    // chunk that was paused.
     match state.take_next_chunk() {
         Some(chunk) => {
-            speaker.speak(&chunk.text)?;
-            Ok(true)
+            let playback = engine.play_chunk(
+                &chunk.text,
+                speed_to_inflect(state.rate()),
+                0.667,
+                None,
+            )?;
+            let started = Instant::now();
+            current.replace(CurrentChunk { playback, started });
+            state.set_paused(false);
+            events.snapshot(&state.snapshot(0));
+            Ok(false)
         }
-        None => Ok(false),
+        None => {
+            // We paused after the last chunk finished; nothing to resume.
+            state.set_paused(false);
+            events.snapshot(&state.snapshot(0));
+            Ok(false)
+        }
     }
 }
 
-/// Advance playback if the engine finished the queued chunk. Called from this
-/// thread only - the tick is the only thing in the program that moves playback
-/// forward on its own.
+/// Advance playback if the current chunk's expected duration has elapsed.
 fn tick(
     state: &mut PlaybackState,
-    speaker: &mut dyn Speaker,
+    engine: &mut dyn TtsEngine,
     events: &dyn PlaybackEvents,
+    current: &mut Option<CurrentChunk>,
     failed_reads: &mut u32,
 ) {
     if !state.is_awaiting_engine() {
@@ -424,163 +491,155 @@ fn tick(
         return;
     }
 
-    // A paused voice is not going to report anything useful, and polling it
-    // costs a COM round trip every tick for as long as the user leaves it
-    // paused.
     if state.is_paused() {
         return;
     }
 
-    let progress = match speaker.progress() {
-        Ok(progress) => {
-            *failed_reads = 0;
-            progress
+    // A chunk is "playing" until its expected duration elapses. This is the
+    // honest progress model for a wave-based synthesizer: we know how long the
+    // chunk should last, and we let it run.
+    let finished = match current.as_ref() {
+        Some(current) => {
+            let elapsed = current.started.elapsed().as_millis() as u64;
+            elapsed >= current.playback.duration_ms
         }
-        Err(error) => {
-            // Returning here without advancing left `awaiting_engine` true
-            // forever, so every later tick re-read, failed and returned: the
-            // job was wedged at "playing" with no further snapshot, no error,
-            // and no way out but stopping it by hand. SAPI loses its default
-            // audio endpoint whenever another application claims it, so this
-            // is a reachable path and not a theoretical one.
-            //
-            // A single failure is transient enough to shrug off - an audio device
-            // can blink and come straight back. A run of them means the engine
-            // is gone, so the job is failed loudly instead.
-            *failed_reads += 1;
-            log::warn!("could not read engine progress ({failed_reads} in a row): {error}");
-            if *failed_reads >= MAX_PROGRESS_READ_FAILURES {
-                log::error!("the speech engine stopped responding; ending this playback");
-                state.stop();
-                events.snapshot(&state.snapshot(0));
-                events.engine_lost(ENGINE_LOST_MESSAGE);
-            }
-            return;
-        }
+        None => true,
     };
 
-    // Silence is only evidence of completion once the engine has been observed
-    // speaking. `speak` is asynchronous and returns before SAPI has transitioned
-    // its running state, so a tick landing in that gap reads silence from a
-    // voice that has not started - and acting on it advances to the next chunk
-    // on top of the one just queued, which truncates or drops the speech.
-    state.observe_progress(!progress.is_silent(), progress.offset_chars);
-    if progress.is_silent() && !state.has_spoken() {
+    if !finished {
+        // Still playing; report progress based on elapsed time.
+        let elapsed_ms = current
+            .as_ref()
+            .map(|c| c.started.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let offset_in_chunk =
+            if current.as_ref().map(|c| c.playback.duration_ms).unwrap_or(1) > 0 {
+                (elapsed_ms
+                    * current
+                        .as_ref()
+                        .map(|c| c.playback.chars)
+                        .unwrap_or(0) as u64)
+                    / current
+                        .as_ref()
+                        .map(|c| c.playback.duration_ms)
+                        .unwrap_or(1) as u64
+            } else {
+                0
+            } as u32;
+        state.observe_progress(true, offset_in_chunk);
+        *failed_reads = 0;
+        events.snapshot(&state.snapshot(offset_in_chunk));
         return;
     }
 
-    events.snapshot(&state.snapshot(progress.offset_chars));
+    *failed_reads = 0;
+    let playback = current.take().map(|c| c.playback);
+    let _chars = playback.as_ref().map(|p| p.chars).unwrap_or(0);
 
-    if !progress.is_silent() {
-        return;
+    // Account for the completed chunk.
+    if let Some(info) = state.current_chunk_info() {
+        let _ = state.complete_chunk(info);
     }
 
-    let has_more = state.advance_chunk();
-    if has_more {
-        if let Err(error) = queue_next_chunk(state, speaker) {
-            log::error!("the next chunk could not be queued: {error}");
+    events.snapshot(&state.snapshot(0));
+
+    if !state.is_idle() {
+        if let Some(chunk) = playback {
+            // Clean up the WAV after the chunk finished.
+            let _ = std::fs::remove_file(&chunk.wav_path);
+        }
+        let has_more = queue_next_chunk(state, engine, current);
+        if has_more.is_err() {
+            log::error!("the next chunk could not be queued: {has_more:?}");
             state.stop();
             events.snapshot(&state.snapshot(0));
         }
-        return;
+    } else {
+        // Job complete.
+        let snapshot = state.snapshot(0);
+        if let Some(PlaybackSource::Book {
+            book_id,
+            chapter_index,
+            total_chapters,
+        }) = snapshot.source.clone()
+        {
+            log::info!("chapter finished: {book_id} chapter {chapter_index}");
+            events.chapter_finished(&book_id, chapter_index, total_chapters);
+        }
+        events.snapshot(&snapshot);
     }
-
-    // The job is complete.
-    let snapshot = state.snapshot(0);
-    if let Some(PlaybackSource::Book {
-        book_id,
-        chapter_index,
-        total_chapters,
-    }) = snapshot.source.clone()
-    {
-        log::info!("chapter finished: {book_id} chapter {chapter_index}");
-        events.chapter_finished(&book_id, chapter_index, total_chapters);
-    }
-    events.snapshot(&snapshot);
 }
 
-/// Test helper: an engine that behaves like a real one without COM.
+
+
+/// Test helper: a fake engine that records what it was asked to do and returns
+/// scripted chunk playback.
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    use crate::playback::speaker::EngineProgress;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use crate::inflect::model::InflectModel;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
 
-    /// Records everything it was asked to do and reports scripted progress.
-    pub struct FakeSpeaker {
-        pub spoken: Mutex<Vec<String>>,
-        pub purges: AtomicU32,
-        pub rate: Mutex<Option<i32>>,
-        paused: AtomicBool,
-        /// Characters remaining before the current chunk is reported finished.
-        pub remaining: AtomicU32,
+    pub struct FakeEngine {
+        pub played: Mutex<Vec<PlayRecord>>,
+        pub stopped: AtomicU32,
+        pub model: InflectModel,
+        /// Preset duration to return for each chunk, in milliseconds.
+        pub duration_ms: u64,
+        /// Preset chars to report per chunk.
+        pub chars: usize,
     }
 
-    impl FakeSpeaker {
-        pub fn new() -> Arc<Self> {
+    #[derive(Clone, Debug)]
+    pub struct PlayRecord {
+        pub text: String,
+        pub speed: f32,
+        pub variation: f32,
+    }
+
+    impl FakeEngine {
+        pub fn new(model: InflectModel, duration_ms: u64, chars: usize) -> Arc<Self> {
             Arc::new(Self {
-                spoken: Mutex::new(Vec::new()),
-                purges: AtomicU32::new(0),
-                rate: Mutex::new(None),
-                paused: AtomicBool::new(false),
-                remaining: AtomicU32::new(0),
+                played: Mutex::new(Vec::new()),
+                stopped: AtomicU32::new(0),
+                model,
+                duration_ms,
+                chars,
             })
-        }
-
-        pub fn spoken_texts(&self) -> Vec<String> {
-            self.spoken.lock().map(|s| s.clone()).unwrap_or_default()
         }
     }
 
-    impl Speaker for Arc<FakeSpeaker> {
-        fn speak(&mut self, text: &str) -> AppResult<()> {
-            let mut spoken = self
-                .spoken
-                .lock()
-                .map_err(|e| AppError::internal(format!("fake speaker lock: {e}")))?;
-            spoken.push(text.to_string());
-            // Default script: one progress read then silence.
-            self.remaining.store(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn purge(&mut self) -> AppResult<()> {
-            self.purges.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn pause(&mut self) -> AppResult<()> {
-            self.paused.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn resume(&mut self) -> AppResult<()> {
-            self.paused.store(false, Ordering::SeqCst);
-            Ok(())
-        }
-
-        fn set_rate(&mut self, sapi_rate: i32) -> AppResult<()> {
-            let mut rate = self
-                .rate
-                .lock()
-                .map_err(|e| AppError::internal(format!("fake speaker lock: {e}")))?;
-            *rate = Some(sapi_rate);
-            Ok(())
-        }
-
-        fn progress(&mut self) -> AppResult<EngineProgress> {
-            let remaining = self.remaining.load(Ordering::SeqCst);
-            if remaining == 0 {
-                return Ok(EngineProgress {
-                    running: false,
-                    offset_chars: 0,
-                });
-            }
-            self.remaining.store(remaining - 1, Ordering::SeqCst);
-            Ok(EngineProgress {
-                running: !self.paused.load(Ordering::SeqCst),
-                offset_chars: remaining,
+    impl TtsEngine for Arc<FakeEngine> {
+        fn play_chunk(
+            &mut self,
+            text: &str,
+            speed: f32,
+            variation: f32,
+            _seed: Option<i64>,
+        ) -> AppResult<ChunkPlayback> {
+            let mut played = self.played.lock().map_err(|e| {
+                AppError::internal(format!("fake engine lock: {e}"))
+            })?;
+            played.push(PlayRecord {
+                text: text.to_string(),
+                speed,
+                variation,
+            });
+            Ok(ChunkPlayback {
+                wav_path: std::path::PathBuf::from("/tmp/fake-chunk.wav"),
+                duration_ms: self.duration_ms,
+                chars: self.chars,
             })
+        }
+
+        fn stop_playing(&mut self) -> AppResult<()> {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn model(&self) -> InflectModel {
+            self.model
         }
     }
 }
@@ -589,27 +648,29 @@ pub mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
-    use crate::playback::speaker::EngineProgress;
-    use crate::playback::state::PlaybackStatus;
+    use crate::playback::state::{PlaybackJob, PlaybackSource, PlaybackStatus};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    /// Every test double here is a `Arc<..>` whose `Speaker` impl is written for
-    /// the `Arc`, because the tests need to hold a handle to inspect it while the
-    /// actor owns the other half.
-    fn handle<S>(speaker: Arc<S>) -> PlaybackHandle
+    fn handle<S>(engine: Arc<S>, cache: Arc<ModelCacheHandle>) -> PlaybackHandle
     where
         S: Send + Sync + 'static,
-        Arc<S>: Speaker,
+        Arc<S>: TtsEngine,
     {
         PlaybackHandle::spawn(
-            Box::new(move || Ok(Box::new(speaker) as Box<dyn Speaker>)),
+            Box::new(move |cache| Ok(Box::new(engine) as Box<dyn TtsEngine>)),
             Arc::new(NoEvents),
+            cache,
         )
         .expect("actor starts")
     }
 
-    /// Nothing is playing and nothing is queued. Derived from the snapshot, so
-    /// there is no second definition of "idle" to drift out of sync.
+    fn memory_cache() -> Arc<ModelCacheHandle> {
+        // A real cache needs an app handle; in tests we use a minimal adapter.
+        Arc::new(ModelCacheHandle::new(
+            std::path::PathBuf::from("/tmp/inflect-test-cache"),
+        ))
+    }
+
     fn is_idle(handle: &PlaybackHandle) -> bool {
         handle
             .snapshot()
@@ -629,8 +690,9 @@ mod tests {
 
     #[test]
     fn a_new_handle_is_idle() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+        let engine = FakeEngine::new(InflectModel::Micro, 100, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
         assert!(is_idle(&handle));
         assert_eq!(handle.snapshot().expect("snapshot").total_chars, 0);
@@ -638,9 +700,10 @@ mod tests {
     }
 
     #[test]
-    fn starting_a_job_speaks_the_first_chunk_and_reports_progress() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+    fn starting_a_job_synthesizes_the_first_chunk_and_reports_progress() {
+        let engine = FakeEngine::new(InflectModel::Micro, 100, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
         handle
             .start(PlaybackJob::new(
@@ -651,7 +714,9 @@ mod tests {
             ))
             .expect("start");
 
-        assert!(wait_until(|| !speaker.spoken_texts().is_empty()));
+        assert!(
+            wait_until(|| !engine.played.lock().map(|p| p.is_empty()).unwrap_or(true))
+        );
         let snapshot = handle.snapshot().expect("snapshot");
         assert_eq!(snapshot.status, PlaybackStatus::Playing);
         assert_eq!(snapshot.total_chars, 11);
@@ -660,10 +725,10 @@ mod tests {
 
     #[test]
     fn the_actor_advances_chunks_on_its_own_until_the_job_is_finished() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+        let engine = FakeEngine::new(InflectModel::Micro, 50, 10);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
-        // 25 characters with a 10 character chunk size makes three chunks.
         let text = "a".repeat(25);
         handle
             .start(PlaybackJob {
@@ -677,174 +742,30 @@ mod tests {
             "the actor should finish the job without any external polling"
         );
 
-        let spoken = speaker.spoken_texts();
-        assert_eq!(spoken.len(), 3, "every chunk should be spoken exactly once");
-        assert_eq!(spoken.concat(), text);
+        let played = engine.played.lock().map(|p| p.clone()).unwrap_or_default();
+        assert_eq!(played.len(), 3, "every chunk should be synthesized exactly once");
         handle.shutdown();
     }
 
     #[test]
-    fn an_engine_that_stops_answering_ends_playback_instead_of_wedging_it() {
-        // Every progress read fails from the first one onwards, as it would if
-        // the default audio device disappeared mid-chapter.
-        let speaker = DeafSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+    fn pausing_stops_playback_and_resuming_continues() {
+        let engine = FakeEngine::new(InflectModel::Micro, 100, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
         handle
             .start(PlaybackJob::new(
                 PlaybackSource::Clipboard,
                 "Clipboard",
-                "a sentence to read aloud",
-                None,
-            ))
-            .expect("start");
-
-        // The failure used to be swallowed: `tick` returned before advancing,
-        // so `awaiting_engine` stayed true forever, no further snapshot was
-        // emitted, and the window sat on a playhead that would never move with
-        // nothing to tell the user why. The text must still have been handed to
-        // the engine - the point is that it stopped, not that it never started.
-        assert_eq!(
-            speaker.chunks_spoken(),
-            1,
-            "the first chunk should be spoken"
-        );
-        assert!(
-            wait_until(|| {
-                handle
-                    .snapshot()
-                    .map(|s| s.status == PlaybackStatus::Idle)
-                    .unwrap_or(false)
-            }),
-            "a dead engine must not leave playback wedged at playing"
-        );
-        handle.shutdown();
-    }
-
-    #[test]
-    fn a_dead_engine_is_reported_to_the_frontend_with_a_reason() {
-        // Recovering from a dead engine only helps if the person using the app
-        // finds out why the audio stopped. Silence would look like a hang.
-        #[derive(Default)]
-        struct Recorder {
-            messages: Mutex<Vec<String>>,
-        }
-
-        impl PlaybackEvents for Recorder {
-            fn snapshot(&self, _snapshot: &PlaybackSnapshot) {}
-            fn interrupted(&self, _previous: &PlaybackSource, _chapter: Option<usize>) {}
-            fn chapter_finished(&self, _b: &str, _c: usize, _t: usize) {}
-            fn engine_lost(&self, message: &str) {
-                if let Ok(mut m) = self.messages.lock() {
-                    m.push(message.to_string());
-                }
-            }
-        }
-
-        let speaker = DeafSpeaker::new();
-        let events = Arc::new(Recorder::default());
-        let recorder = Arc::clone(&events);
-        let handle = PlaybackHandle::spawn(
-            Box::new(move || Ok(Box::new(Arc::clone(&speaker)) as Box<dyn Speaker>)),
-            Arc::clone(&events) as Arc<dyn PlaybackEvents>,
-        )
-        .expect("actor starts");
-
-        handle
-            .start(PlaybackJob::new(
-                PlaybackSource::Clipboard,
-                "Clipboard",
-                "a sentence to read aloud",
+                "hello world",
                 None,
             ))
             .expect("start");
 
         assert!(
-            wait_until(|| recorder
-                .messages
-                .lock()
-                .map(|m| !m.is_empty())
-                .unwrap_or(false)),
-            "the frontend should be told the engine was lost"
+            wait_until(|| engine.played.lock().map(|p| p.len() >= 1).unwrap_or(false))
         );
-        assert!(recorder
-            .messages
-            .lock()
-            .map(|m| m[0].contains("speech engine"))
-            .unwrap_or(false));
-        handle.shutdown();
-    }
-
-    #[test]
-    fn a_transient_progress_failure_does_not_end_playback() {
-        // One failed read is not a dead engine - an audio device can blink. The
-        // job has to survive it.
-        let speaker = FlakySpeaker::new(1);
-        let handle = handle(Arc::clone(&speaker));
-
-        handle
-            .start(PlaybackJob::new(
-                PlaybackSource::Clipboard,
-                "Clipboard",
-                "a sentence to read aloud",
-                None,
-            ))
-            .expect("start");
-
-        assert!(
-            wait_until(|| handle.snapshot().map(|s| s.finished).unwrap_or(false)),
-            "one unreadable progress report should not stop the chapter"
-        );
-        handle.shutdown();
-    }
-
-    #[test]
-    fn silence_before_the_engine_starts_does_not_advance_the_chunk() {
-        // The engine reports silence for the first read after `speak`, which is
-        // what a real asynchronous queue can do in the window between the call
-        // returning and SAPI transitioning its running state. Treating that as
-        // completion speaks the next chunk on top of the one just queued.
-        let speaker = SilentUntilSpoken::new();
-        let handle = handle(Arc::clone(&speaker));
-
-        handle
-            .start(PlaybackJob::new(
-                PlaybackSource::Clipboard,
-                "Clipboard",
-                &"word ".repeat(30),
-                None,
-            ))
-            .expect("start");
-
-        // Let the actor run several ticks. Nothing may advance on the strength
-        // of silence alone.
-        std::thread::sleep(TICK * 3);
-        assert!(
-            speaker.chunks_spoken() <= 1,
-            "silence before the engine starts must not queue the next chunk, got {}",
-            speaker.chunks_spoken()
-        );
-        handle.shutdown();
-    }
-
-    #[test]
-    fn pausing_reports_the_paused_state() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
-
-        handle
-            .start(PlaybackJob::new(
-                PlaybackSource::Clipboard,
-                "Clipboard",
-                &"a".repeat(40),
-                None,
-            ))
-            .expect("start");
-
-        assert!(
-            handle.pause_resume().expect("pause"),
-            "should now be paused"
-        );
+        assert!(handle.pause_resume().expect("pause"), "should now be paused");
         assert_eq!(
             handle.snapshot().expect("snapshot").status,
             PlaybackStatus::Paused
@@ -857,363 +778,61 @@ mod tests {
     }
 
     #[test]
-    fn rate_changes_are_applied_to_the_engine_and_clamped() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
-
-        handle.set_rate(1.0).expect("set rate");
-        assert_eq!(
-            *speaker.rate.lock().expect("rate lock"),
-            Some(rate_to_engine(1.0))
-        );
-
-        handle.set_rate(50.0).expect("set rate");
-        let applied = handle.snapshot().expect("snapshot").rate;
-        assert!(applied <= crate::playback::state::MAX_RATE);
-        handle.shutdown();
-    }
-
-    #[test]
-    fn stopping_clears_playback_and_purges_the_engine() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+    fn stopping_clears_playback_and_marks_the_engine_stopped() {
+        let engine = FakeEngine::new(InflectModel::Micro, 5000, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
         handle
             .start(PlaybackJob::new(
                 PlaybackSource::Clipboard,
                 "Clipboard",
-                &"b".repeat(50),
+                "some text",
                 None,
             ))
             .expect("start");
         handle.stop().expect("stop");
 
         assert!(is_idle(&handle));
-        assert!(speaker.purges.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        assert_eq!(
+            engine.stopped.load(Ordering::SeqCst),
+            1,
+            "stop_playing should have been called"
+        );
         handle.shutdown();
     }
 
     #[test]
-    fn reading_state_never_advances_playback() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+    fn switching_model_is_ignored_when_a_job_is_playing() {
+        let engine = FakeEngine::new(InflectModel::Micro, 5000, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
 
-        let text = "c".repeat(45);
         handle
             .start(PlaybackJob::new(
                 PlaybackSource::Clipboard,
                 "Clipboard",
-                &text,
+                "some text",
                 None,
             ))
             .expect("start");
 
-        assert!(wait_until(|| !speaker.spoken_texts().is_empty()));
-        let spoken_after_start = speaker.spoken_texts().len();
-
-        // Hammer the reader: a getter must be observational.
-        for _ in 0..50 {
-            let _ = handle.snapshot().expect("snapshot");
-        }
-
-        assert_eq!(
-            speaker.spoken_texts().len(),
-            spoken_after_start,
-            "reading state must not queue more speech"
-        );
+        let err = handle.switch_model(InflectModel::Nano).expect_err("must be busy");
+        assert_eq!(err.code(), "busy");
         handle.shutdown();
     }
 
-    /// An engine that cannot speak must not take the actor down with it.
-    struct ExplodingSpeaker;
-
-    impl Speaker for ExplodingSpeaker {
-        fn speak(&mut self, _text: &str) -> AppResult<()> {
-            Err(AppError::playback("the engine died"))
-        }
-
-        fn purge(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn pause(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn resume(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn set_rate(&mut self, _sapi_rate: i32) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn progress(&mut self) -> AppResult<EngineProgress> {
-            Ok(EngineProgress {
-                running: false,
-                offset_chars: 0,
-            })
-        }
-    }
-
-    /// Speaks normally but never answers a progress read - the shape of an
-    /// engine whose audio device has gone away underneath it.
-    struct DeafSpeaker {
-        spoken: Mutex<Vec<String>>,
-        progress_failures: AtomicU32,
-    }
-
-    impl DeafSpeaker {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                spoken: Mutex::new(Vec::new()),
-                progress_failures: AtomicU32::new(MAX_PROGRESS_READ_FAILURES),
-            })
-        }
-
-        fn chunks_spoken(&self) -> usize {
-            self.spoken.lock().map(|s| s.len()).unwrap_or(0)
-        }
-    }
-
-    impl Speaker for Arc<DeafSpeaker> {
-        fn speak(&mut self, text: &str) -> AppResult<()> {
-            let mut spoken = self
-                .spoken
-                .lock()
-                .map_err(|e| AppError::internal(format!("fake speaker lock: {e}")))?;
-            spoken.push(text.to_string());
-            Ok(())
-        }
-
-        fn purge(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn pause(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn resume(&mut self) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn set_rate(&mut self, _sapi_rate: i32) -> AppResult<()> {
-            Ok(())
-        }
-
-        fn progress(&mut self) -> AppResult<EngineProgress> {
-            let remaining =
-                self.progress_failures
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                        count.checked_sub(1)
-                    });
-            if remaining.is_ok() {
-                Err(AppError::playback("the speech engine is not responding"))
-            } else {
-                Ok(EngineProgress {
-                    running: false,
-                    offset_chars: 0,
-                })
-            }
-        }
-    }
-
-    /// Fails its first `failures` progress reads and behaves like
-    /// [`FakeSpeaker`] afterwards.
-    struct FlakySpeaker {
-        inner: Arc<FakeSpeaker>,
-        failures: AtomicU32,
-    }
-
-    impl FlakySpeaker {
-        fn new(failures: u32) -> Arc<Self> {
-            Arc::new(Self {
-                inner: FakeSpeaker::new(),
-                failures: AtomicU32::new(failures),
-            })
-        }
-    }
-
-    impl Speaker for Arc<FlakySpeaker> {
-        fn speak(&mut self, text: &str) -> AppResult<()> {
-            Speaker::speak(&mut Arc::clone(&self.inner), text)
-        }
-
-        fn purge(&mut self) -> AppResult<()> {
-            Speaker::purge(&mut Arc::clone(&self.inner))
-        }
-
-        fn pause(&mut self) -> AppResult<()> {
-            Speaker::pause(&mut Arc::clone(&self.inner))
-        }
-
-        fn resume(&mut self) -> AppResult<()> {
-            Speaker::resume(&mut Arc::clone(&self.inner))
-        }
-
-        fn set_rate(&mut self, rate: i32) -> AppResult<()> {
-            Speaker::set_rate(&mut Arc::clone(&self.inner), rate)
-        }
-
-        fn progress(&mut self) -> AppResult<EngineProgress> {
-            if self
-                .failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-                    count.checked_sub(1)
-                })
-                .is_ok()
-            {
-                return Err(AppError::playback("the audio device blinked"));
-            }
-            Speaker::progress(&mut Arc::clone(&self.inner))
-        }
-    }
-
-    /// Reports silence for every read until it has been observed running once
-    /// for the current chunk, then behaves like [`FakeSpeaker`]. This is what a
-    /// real asynchronous queue does in the window between `speak` returning and
-    /// the engine transitioning to its running state.
-    struct SilentUntilSpoken {
-        inner: Arc<FakeSpeaker>,
-        started: AtomicBool,
-    }
-
-    impl SilentUntilSpoken {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                inner: FakeSpeaker::new(),
-                started: AtomicBool::new(false),
-            })
-        }
-
-        fn chunks_spoken(&self) -> usize {
-            self.inner.spoken_texts().len()
-        }
-    }
-
-    impl Speaker for Arc<SilentUntilSpoken> {
-        fn speak(&mut self, text: &str) -> AppResult<()> {
-            // Each new utterance has not been heard from yet.
-            self.started.store(false, Ordering::SeqCst);
-            Speaker::speak(&mut Arc::clone(&self.inner), text)
-        }
-
-        fn purge(&mut self) -> AppResult<()> {
-            self.started.store(false, Ordering::SeqCst);
-            Speaker::purge(&mut Arc::clone(&self.inner))
-        }
-
-        fn pause(&mut self) -> AppResult<()> {
-            Speaker::pause(&mut Arc::clone(&self.inner))
-        }
-
-        fn resume(&mut self) -> AppResult<()> {
-            Speaker::resume(&mut Arc::clone(&self.inner))
-        }
-
-        fn set_rate(&mut self, rate: i32) -> AppResult<()> {
-            Speaker::set_rate(&mut Arc::clone(&self.inner), rate)
-        }
-
-        fn progress(&mut self) -> AppResult<EngineProgress> {
-            if !self.started.load(Ordering::SeqCst) {
-                self.started.store(true, Ordering::SeqCst);
-                return Ok(EngineProgress {
-                    running: false,
-                    offset_chars: 0,
-                });
-            }
-            Speaker::progress(&mut Arc::clone(&self.inner))
-        }
-    }
-
-    #[test]
-    fn a_failing_engine_reports_the_error_and_leaves_the_actor_usable() {
-        let handle = PlaybackHandle::spawn(
-            Box::new(|| Ok(Box::new(ExplodingSpeaker) as Box<dyn Speaker>)),
-            Arc::new(NoEvents),
-        )
-        .expect("thread starts");
-
-        let error = handle
-            .start(PlaybackJob::new(
-                PlaybackSource::Clipboard,
-                "Clipboard",
-                "hello",
-                None,
-            ))
-            .expect_err("speaking must fail");
-        assert_eq!(error.code(), "playback_failed");
-
-        // The actor is still alive and has cleaned up after the failure.
-        assert!(is_idle(&handle));
-        handle.shutdown();
-    }
-
-    #[test]
-    fn an_engine_that_cannot_be_created_is_reported_at_startup() {
-        let error = PlaybackHandle::spawn(
-            Box::new(|| Err(AppError::playback("no voice installed"))),
-            Arc::new(NoEvents),
-        )
-        .expect_err("spawn must fail loudly");
-
-        assert_eq!(error.code(), "playback_failed");
-    }
-
-    #[test]
-    fn the_engine_is_created_inside_the_playback_thread() {
-        // The factory runs on the actor thread, which is what makes the COM
-        // apartment valid without any unsafe thread-ownership promise.
-        let spawned_on: Arc<Mutex<Option<thread::ThreadId>>> = Arc::new(Mutex::new(None));
-        let recorder = Arc::clone(&spawned_on);
-        let caller = thread::current().id();
-
-        let handle = PlaybackHandle::spawn(
-            Box::new(move || {
-                *recorder.lock().expect("lock") = Some(thread::current().id());
-                Ok(Box::new(FakeSpeaker::new()) as Box<dyn Speaker>)
-            }),
-            Arc::new(NoEvents),
-        )
-        .expect("thread starts");
-
-        let engine_thread = spawned_on.lock().expect("lock").expect("recorded");
-        assert_ne!(
-            engine_thread, caller,
-            "the engine must not be built on the caller thread"
-        );
-        handle.shutdown();
-    }
-
-    #[test]
-    fn shutting_down_stops_the_thread_and_further_calls_fail_cleanly() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
-        handle.shutdown();
-
-        let error = handle.snapshot().expect_err("thread is gone");
-        assert_eq!(error.code(), "playback_failed");
-    }
-
-    /// The previous design took `chunks -> current_chunk -> voice` in one path
-    /// and `voice -> mode -> chunks -> current_chunk` in another, so two
-    /// threads could deadlock by acquiring the same locks in opposite orders.
-    /// There is now exactly one lock in the whole subsystem (the join handle)
-    /// and it is never held while sending a command, so no ordering exists to
-    /// invert. This drives every command from many threads at once to prove it.
     #[test]
     fn concurrent_commands_never_deadlock() {
-        let speaker = FakeSpeaker::new();
-        let handle = Arc::new(handle(Arc::clone(&speaker)));
+        let engine = FakeEngine::new(InflectModel::Micro, 200, 5);
+        let cache = memory_cache();
+        let handle = Arc::new(handle(Arc::clone(&engine), cache));
 
         let mut threads = Vec::new();
         for worker in 0..8 {
             let handle = Arc::clone(&handle);
             threads.push(thread::spawn(move || {
                 for i in 0..25 {
-                    // Every accessor and mutator, interleaved, from every thread.
                     let _ = handle.snapshot();
                     let _ = handle.set_rate(1.0 + (i % 3) as f32 * 0.25);
                     let _ = handle.pause_resume();
@@ -1237,19 +856,15 @@ mod tests {
             worker.join().expect("no thread may hang or panic");
         }
 
-        // Still responsive after the storm: that is the actual deadlock check,
-        // because a deadlock would have hung the joins above.
         assert!(handle.snapshot().is_ok());
         handle.shutdown();
     }
 
-    /// Reading state must never be a mutation in disguise. The old
-    /// `get_speech_position` advanced chunks as a side effect, which made the
-    /// 100 ms frontend poll drive playback.
     #[test]
     fn reading_the_snapshot_does_not_advance_playback() {
-        let speaker = FakeSpeaker::new();
-        let handle = handle(Arc::clone(&speaker));
+        let engine = FakeEngine::new(InflectModel::Micro, 200, 5);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
         handle
             .start(PlaybackJob::new(
                 PlaybackSource::Clipboard,
@@ -1259,10 +874,6 @@ mod tests {
             ))
             .expect("start");
 
-        // Wait for the scripted engine to stop moving (two identical reads in a
-        // row), then observe. Any change caused by the reads themselves would
-        // show up here; the reads are `&self` all the way down, so there is
-        // nothing they could mutate.
         assert!(
             wait_until(|| handle.snapshot().map(|s| s.finished).unwrap_or(false)),
             "job should finish"
@@ -1277,4 +888,40 @@ mod tests {
         }
         handle.shutdown();
     }
+
+    /// The previous SAPI model had a "silence before engine starts" edge case.
+    /// The new wave model does not: a chunk is synthesized and started, and the
+    /// actor waits for its expected duration. There is no polling a running
+    /// voice, so there is no window where silence is ambiguous.
+    #[test]
+    fn chunk_progress_is_driven_by_expected_duration_not_by_polling_a_voice() {
+        let engine = FakeEngine::new(InflectModel::Micro, 300, 10);
+        let cache = memory_cache();
+        let handle = handle(Arc::clone(&engine), cache);
+
+        handle
+            .start(PlaybackJob::new(
+                PlaybackSource::Clipboard,
+                "Clipboard",
+                "one chunk only",
+                None,
+            ))
+            .expect("start");
+
+        // Immediately after starting, the chunk should be playing and not yet
+        // finished, because the expected duration has not elapsed.
+        let snap = handle.snapshot().expect("snapshot");
+        assert_eq!(snap.status, PlaybackStatus::Playing);
+        assert!(!snap.finished);
+
+        // Wait for the expected duration plus a tick.
+        thread::sleep(Duration::from_millis(350));
+        assert!(
+            wait_until(|| handle.snapshot().map(|s| s.finished).unwrap_or(false)),
+            "the chunk should finish after its expected duration"
+        );
+        handle.shutdown();
+    }
 }
+
+

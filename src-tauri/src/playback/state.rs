@@ -18,6 +18,41 @@ pub const MIN_RATE: f32 = 0.5;
 pub const MAX_RATE: f32 = 4.0;
 pub const DEFAULT_RATE: f32 = 1.0;
 
+/// Metadata about the chunk currently being spoken, used by the actor for
+/// completion accounting.
+#[derive(Clone)]
+pub struct ChunkInfo {
+    pub char_count: u32,
+}
+
+impl PlaybackState {
+    /// The chunk metadata for the chunk currently being spoken, if any.
+    pub fn current_chunk_info(&self) -> Option<ChunkInfo> {
+        self.job.as_ref().and_then(|job| job.chunks.get(self.current_chunk).map(|chunk| ChunkInfo {
+            char_count: chunk.char_count as u32,
+        }))
+    }
+
+    /// Account for a chunk as fully spoken: advance `completed_chars`, move to
+    /// the next chunk, and reset per-chunk progress tracking.
+    ///
+    /// Returns `true` when another chunk is still waiting.
+    pub fn complete_chunk(&mut self, info: ChunkInfo) -> bool {
+        self.completed_chars = self.completed_chars.saturating_add(info.char_count);
+        self.current_chunk += 1;
+        self.awaiting_engine = false;
+        self.observed_speaking = false;
+        self.last_offset = 0;
+
+        let has_more = self.current_chunk < self.job.as_ref().map_or(0, |job| job.chunks.len());
+        if !has_more {
+            self.finished = true;
+            self.status = PlaybackStatus::Idle;
+        }
+        has_more
+    }
+}
+
 /// What is currently being spoken.
 ///
 /// Serialized as `{ "kind": "clipboard" }` or
@@ -273,6 +308,10 @@ impl PlaybackState {
 
     pub fn total_chars(&self) -> u32 {
         self.job.as_ref().map_or(0, PlaybackJob::total_chars)
+    }
+
+    pub fn rate(&self) -> f32 {
+        self.rate
     }
 
     /// Text of the next chunk to speak, and how many characters it holds.

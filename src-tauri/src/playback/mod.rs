@@ -3,28 +3,22 @@
 //! * [`state`] holds every fact about what is being spoken. It has no I/O and no
 //!   platform dependencies, so the rules are unit-testable.
 //! * [`actor`] is the only thread allowed to mutate that state, and the only
-//!   thing that owns the speech engine.
-//! * [`speaker`] is the engine boundary: SAPI on Windows, an explicit
-//!   unsupported-platform error elsewhere.
+//!   thing that owns the local TTS engine.
+//! * [`engine`] is the engine boundary: a local Inflect v2 wave synthesizer with
+//!   a fake implementation for tests.
 //! * [`commands`] is the Tauri surface, and is the same on every platform.
 
 pub mod actor;
 pub mod commands;
-pub mod speaker;
+pub mod engine;
 pub mod state;
 
-#[cfg(not(windows))]
-mod speaker_stub;
-#[cfg(windows)]
-mod speaker_windows;
-
-#[cfg(not(windows))]
-pub use speaker_stub::speaker_factory;
-#[cfg(windows)]
-pub use speaker_windows::speaker_factory;
+pub mod inflect_engine;
 
 pub use actor::{PlaybackEvents, PlaybackHandle};
+pub use engine::{TtsEngine, ChunkPlayback};
 pub use state::{PlaybackJob, PlaybackSnapshot, PlaybackSource};
+pub use crate::inflect::model::ModelCacheHandle;
 
 use crate::error::{AppError, AppResult};
 
@@ -39,4 +33,10 @@ pub fn read_clipboard() -> AppResult<String> {
     clipboard
         .get_text()
         .map_err(|e| AppError::playback(format!("the clipboard could not be read ({e})")))
+}
+
+/// Build a shared model-cache handle from the app's app-data directory. Used by
+/// tests and by the app setup path.
+pub fn model_cache_for_app_dir(base: std::path::PathBuf) -> ModelCacheHandle {
+    ModelCacheHandle::new(base)
 }

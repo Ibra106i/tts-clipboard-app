@@ -1,4 +1,5 @@
 mod error;
+mod inflect;
 mod library;
 mod models;
 mod parser;
@@ -6,7 +7,10 @@ mod playback;
 mod text;
 
 use crate::error::{AppError, AppResult};
+use crate::inflect::commands::ModelState;
+use crate::inflect::model::{InflectModel, ModelCacheHandle};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -79,16 +83,25 @@ pub fn run() {
                 Err(e) => log::warn!("log directory unavailable: {e}"),
             }
 
-            // Start the playback thread. It creates the speech engine inside
-            // itself (COM objects must not cross threads) and owns the playback
-            // state machine for the lifetime of the process.
+            // Start the playback thread. It creates the local Inflect engine
+            // inside itself and owns the playback state machine for the lifetime
+            // of the process.
             {
                 let events = std::sync::Arc::new(PlaybackEventsSink {
                     app: app.handle().clone(),
                 });
-                match playback::PlaybackHandle::spawn(playback::speaker_factory(), events) {
+                let cache = Arc::new(ModelCacheHandle::new(
+                    inflect::model_cache_dir(&app.handle())?
+                ));
+                match playback::PlaybackHandle::spawn(
+                    Box::new(inflect::engine_factory(cache.clone())),
+                    events,
+                    cache.clone(),
+                ) {
                     Ok(handle) => {
                         app.manage(handle);
+                        app.manage(cache);
+                        app.manage(ModelState::new(InflectModel::Micro));
                     }
                     Err(error) => log::error!("Playback is unavailable: {error}"),
                 }
@@ -258,6 +271,8 @@ pub fn run() {
             playback::commands::set_tts_rate,
             playback::commands::playback_get_state,
             playback::commands::stop_tts,
+            inflect::commands::tts_model_info,
+            inflect::commands::tts_switch_model,
             cmd_open_file_dialog,
             cmd_import_book,
             cmd_get_library,
