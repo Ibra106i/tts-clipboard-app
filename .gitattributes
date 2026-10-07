@@ -1,0 +1,48 @@
+# Line-ending policy.
+#
+# This project is developed on Windows and gated on Windows CI, and it is
+# checked by tools that are whitespace-sensitive: `cargo fmt --check` and
+# `oxlint`. Without an explicit policy, whether a file is stored with LF or
+# CRLF depends on each contributor's `core.autocrlf`, so the same source can
+# produce a format-check failure on one machine and a clean pass on another,
+# and a reformatting churn diff that hides the real change under review.
+#
+# So: every text file is stored as LF in the repository, and Git converts to
+# the platform-native form on checkout.
+* text=auto eol=lf
+
+# ── Text: stored LF ────────────────────────────────────────────────
+*.rs                          text eol=lf
+*.toml                        text eol=lf
+*.py                          text eol=lf
+*.ts                          text eol=lf
+*.tsx                         text eol=lf
+*.js                          text eol=lf
+*.json                        text eol=lf
+*.css                         text eol=lf
+*.html                        text eol=lf
+*.md                          text eol=lf
+*.yml                         text eol=lf
+*.yaml                        text eol=lf
+*.svg                         text eol=lf
+
+# ── Scripts that Windows requires to be CRLF ───────────────────────
+# cmd.exe parses a batch file line by line and mishandles a trailing LF on
+# goto/label lines, so these must keep CRLF regardless of the policy above.
+*.bat                         text eol=crlf
+*.cmd                         text eol=crlf
+
+# ── Binary: never converted, never diffed ──────────────────────────
+*.png                         binary
+*.jpg                         binary
+*.ico                         binary
+*.icns                        binary
+*.wav                         binary
+*.zip                         binary
+
+# ── Lockfiles ──────────────────────────────────────────────────────
+# Both are committed deliberately: they are the only thing that makes a
+# dependency install reproducible. They are collapsed in diffs because a
+# full resolution tree is noise, not review material.
+package-lock.json             -diff linguist-generated
+src-tauri/Cargo.lock          -diff linguist-generated

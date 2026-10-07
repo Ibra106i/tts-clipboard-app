@@ -33,3 +33,55 @@ coverage/
 *.njsproj
 *.sln
 *.sw?
+
+# ── Secrets ────────────────────────────────────────────────────────
+# Nothing in this app needs a committed credential: the Rust side talks
+# only to the local filesystem, and the single CI variable that matters
+# (TAURI_SIGNING_PRIVATE_KEY) is supplied by the repository secret store.
+# These patterns exist so that stays true by accident-proof default rather
+# than by memory. `.env.example` is the one dotenv file allowed through.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# ── Python bytecode ────────────────────────────────────────────────
+# `src-tauri/inflect/` ships `inflect_speak.py` to the installer as a plain
+# source file. Bytecode compiled on a developer machine is not portable,
+# is not reviewed, and would be published alongside the script.
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+
+# ── Staged-import scratch ──────────────────────────────────────────
+# The importer copies a book to `<id>.<ext>.part` and then either renames
+# it or deletes it. A crash can leave one behind; it must never be
+# committed as if it were a real book.
+*.part
+*.tmp
+
+# ── Release bundles and vendor drops ───────────────────────────────
+# Installers, zipped source snapshots, and model checkouts are build
+# inputs or outputs, not source.
+*.zip
+*.msi
+*.exe
+inflect/models/
+
+# ── Local agent/dev scratch ────────────────────────────────────────
+# `D:Temp...` are Windows path artifacts from an earlier tool run writing
+# to a literal "D:Temp" relative path. They contain local filesystem
+# paths and crash output, so they stay local.
+D:Temp*
+codebuff*.log
+
+# ── OS cruft ───────────────────────────────────────────────────────
+Thumbs.db
+Thumbs.db:encryptable
+desktop.ini
