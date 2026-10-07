@@ -4,6 +4,7 @@ mod library;
 mod models;
 mod parser;
 mod playback;
+mod redact;
 mod text;
 
 use crate::error::{AppError, AppResult};
@@ -79,7 +80,7 @@ pub fn run() {
                 }
             );
             match app.path().app_log_dir() {
-                Ok(dir) => log::info!("log directory: {}", dir.display()),
+                Ok(dir) => log::info!("log directory: {}", redact::path(&dir)),
                 Err(e) => log::warn!("log directory unavailable: {e}"),
             }
 

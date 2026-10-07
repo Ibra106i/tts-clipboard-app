@@ -11,6 +11,7 @@
 //! a raw CLI instruction.
 
 use crate::error::{AppError, AppResult};
+use crate::redact;
 use std::path::PathBuf;
 use tauri::Manager;
 
@@ -74,7 +75,7 @@ impl ModelCache {
                 "the Inflect {model} model download did not produce a usable model directory"
             )));
         }
-        log::info!("Inflect {model} model ready at {path:?}");
+        log::info!("Inflect {model} model ready at {}", redact::path(&path));
         Ok(path)
     }
 

@@ -1,6 +1,7 @@
 use crate::error::{AppError, AppResult};
 use crate::models::{Book, Chapter};
 use crate::parser;
+use crate::redact;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -23,9 +24,9 @@ pub fn read_library_file(path: &Path) -> AppResult<Vec<Book>> {
         return Ok(Vec::new());
     }
     let data = fs::read_to_string(path)
-        .map_err(|e| AppError::storage("read", format!("{}: {e}", path.display())))?;
+        .map_err(|e| AppError::storage("read", format!("{}: {e}", redact::path(path))))?;
     serde_json::from_str(&data)
-        .map_err(|e| AppError::storage("parse", format!("{}: {e}", path.display())))
+        .map_err(|e| AppError::storage("parse", format!("{}: {e}", redact::path(path))))
 }
 
 pub fn write_library_file(path: &Path, books: &[Book]) -> AppResult<()> {
@@ -39,12 +40,12 @@ pub fn write_library_file(path: &Path, books: &[Book]) -> AppResult<()> {
     // previous complete state or the new one.
     let temp_path = path.with_extension("json.tmp");
     fs::write(&temp_path, &data)
-        .map_err(|e| AppError::storage("write", format!("{}: {e}", temp_path.display())))?;
+        .map_err(|e| AppError::storage("write", format!("{}: {e}", redact::path(&temp_path))))?;
     if let Err(e) = fs::rename(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(AppError::storage(
             "replace",
-            format!("{}: {e}", path.display()),
+            format!("{}: {e}", redact::path(path)),
         ));
     }
     Ok(())
@@ -69,7 +70,7 @@ fn index_of(books: &[Book], book_id: &str) -> AppResult<usize> {
 /// Size guard: reject oversized files before copying or parsing them.
 fn check_import_size(source: &Path) -> AppResult<()> {
     let metadata = fs::metadata(source)
-        .map_err(|e| AppError::storage("stat", format!("{}: {e}", source.display())))?;
+        .map_err(|e| AppError::storage("stat", format!("{}: {e}", redact::path(source))))?;
     if metadata.len() > MAX_IMPORT_BYTES {
         let size_mib = metadata.len() / (1024 * 1024);
         return Err(AppError::invalid_input(format!(
@@ -82,11 +83,11 @@ fn check_import_size(source: &Path) -> AppResult<()> {
 
 /// Content fingerprint used to recognise duplicate imports.
 fn file_fingerprint(path: &Path) -> AppResult<String> {
-    let mut file =
-        fs::File::open(path).map_err(|e| AppError::storage("open", format!("{path:?}: {e}")))?;
+    let mut file = fs::File::open(path)
+        .map_err(|e| AppError::storage("open", format!("{}: {e}", redact::path(path))))?;
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher)
-        .map_err(|e| AppError::storage("read", format!("{path:?}: {e}")))?;
+        .map_err(|e| AppError::storage("read", format!("{}: {e}", redact::path(path))))?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -203,7 +204,7 @@ impl Drop for StagedImport {
             if e.kind() != std::io::ErrorKind::NotFound {
                 log::warn!(
                     "could not remove the staged import {}: {e}",
-                    self.temp_path.display()
+                    redact::path(&self.temp_path)
                 );
             }
         }
@@ -281,7 +282,7 @@ pub fn import_book(file_path: String, app_handle: &tauri::AppHandle) -> AppResul
         // an unreferenced file is exactly the orphan this change removes.
         if let Err(e) = fs::remove_file(&stored_path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                log::warn!("could not roll back {}: {e}", stored_path.display());
+                log::warn!("could not roll back {}: {e}", redact::path(&stored_path));
             }
         }
         return Err(error);
@@ -301,7 +302,7 @@ pub fn delete_book(book_id: &str, app_handle: &tauri::AppHandle) -> AppResult<()
     let path = PathBuf::from(&book.file_path);
     if path.exists() {
         fs::remove_file(&path)
-            .map_err(|e| AppError::storage("delete", format!("{}: {e}", path.display())))?;
+            .map_err(|e| AppError::storage("delete", format!("{}: {e}", redact::path(&path))))?;
     }
 
     books.retain(|b| b.id != book_id);
