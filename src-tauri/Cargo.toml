@@ -27,7 +27,12 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 arboard = "3"
-lopdf = "0.34"
+# 0.42.0 is the floor, not a preference: below it, `Document::load` recurses
+# without bound on nested PDF objects and a ~21 KB crafted file aborts the
+# process with SIGABRT (RUSTSEC-2026-0187, CVSS 7.5). A SIGABRT is not a panic,
+# so `catch_unwind` cannot contain it - the only fix is to not run the affected
+# parser. This app parses untrusted PDFs, so the floor applies to it directly.
+lopdf = "0.45"
 epub = "2"
 scraper = "0.22"
 chrono = { version = "0.4", features = ["serde"] }

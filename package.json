@@ -15,6 +15,7 @@
     "lint": "oxlint --deny-warnings",
     "verify:lockfile": "node scripts/verify-lockfile.mjs",
     "test:lockfile": "node scripts/verify-lockfile.test.mjs",
+    "audit:rust": "cd src-tauri && cargo deny check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

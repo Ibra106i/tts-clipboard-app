@@ -1,0 +1,80 @@
+# cargo-deny policy for the Rust side of the app.
+#
+# Why this file exists: the three crates that parse untrusted documents in this
+# app (`lopdf`, `epub`, `scraper`) are exactly the kind that attract advisories,
+# and until now nothing checked. The npm side had `npm audit` available by habit;
+# the Rust side had no equivalent, so a crate could sit on a published
+# vulnerability indefinitely without anything in the project noticing.
+#
+# Run with: cargo deny check
+#
+# `[bans]` and `[sources]` are included because the same supply-chain reasoning
+# that produced the lockfile gate on the npm side applies here: a dependency
+# that resolves from somewhere other than crates.io, or a second copy of a crate
+# that security fixes will not reach, is a real problem rather than a style
+# preference.
+
+[advisories]
+version = 2
+
+# A known vulnerability in the dependency tree fails the build. This is the
+# whole point of the file, so it is not a warning.
+vulnerability = "deny"
+
+# Unmaintained and unsound crates are reported rather than ignored. They are
+# warnings instead of denials because an unmaintained crate is not itself a
+# vulnerability, and making it fatal would push contributors to silence the
+# check rather than to replace the crate.
+unmaintained = "warn"
+unsound = "warn"
+
+# Yanked releases are denied: a yank means the publisher withdrew the version,
+# which usually means it should not be built against.
+yanked = "deny"
+
+# Nothing is ignored. If an advisory genuinely does not apply, it belongs here
+# as an explicit entry with a comment explaining why - which is a decision, and
+# should be visible as one.
+ignore = []
+
+[licenses]
+version = 2
+
+# Permissive licenses only. This project declares no license of its own
+# (`license = ""` in Cargo.toml), so it has no business shipping copyleft code
+# into a distributed desktop binary.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+    "Unlicense",
+]
+
+# `epub` is GPL-3.0. It is listed here rather than removed because it is the
+# only EPUB reader in the tree and replacing it is a product decision, not a
+# cleanup. This is flagged as an OPEN COMPLIANCE QUESTION, not a settled one:
+# statically linking GPL-3.0 code into a distributed binary carries copyleft
+# obligations that a permissive-license allowlist was written to avoid. Whoever
+# ships this app needs to decide between accepting GPL-3.0, swapping the crate,
+# or isolating EPUB parsing in a separate process.
+[[licenses.exceptions]]
+name = "epub"
+allow = ["GPL-3.0"]
+reason = "Only EPUB reader available in the tree; GPL-3.0 obligations are an open ship/no-ship decision."
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Dependencies must come from crates.io. An unknown registry or an unvetted git
+# source can be substituted for a crate without any version changing.
+unknown-registry = "deny"
+unknown-git = "deny"
