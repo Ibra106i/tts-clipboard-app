@@ -3,6 +3,9 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -10,6 +13,8 @@
     "tauri": "tauri",
     "typecheck": "tsc -b",
     "lint": "oxlint --deny-warnings",
+    "verify:lockfile": "node scripts/verify-lockfile.mjs",
+    "test:lockfile": "node scripts/verify-lockfile.test.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -17,7 +22,7 @@
     "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml",
     "fmt:rust:check": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
-    "verify": "npm run typecheck && npm run lint && npm run test && npm run fmt:rust:check && npm run lint:rust && npm run test:rust"
+    "verify": "npm run verify:lockfile && npm run test:lockfile && npm run typecheck && npm run lint && npm run test && npm run fmt:rust:check && npm run lint:rust && npm run test:rust"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

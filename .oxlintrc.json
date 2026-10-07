@@ -45,6 +45,18 @@
         "typescript/no-non-null-assertion": "off",
         "no-console": "off"
       }
+    },
+    {
+      // `scripts/` holds Node CLI tools run directly by npm - the lockfile
+      // supply-chain gate and its self-test. Their contract is what they print:
+      // a verifier that fails silently is useless, and its output has to land on
+      // stdout for a human and for the CI log to read it. `no-console` exists to
+      // catch leftover debugging in code that ships to the webview, which none
+      // of these files do.
+      "files": ["scripts/**"],
+      "rules": {
+        "no-console": "off"
+      }
     }
   ]
 }
