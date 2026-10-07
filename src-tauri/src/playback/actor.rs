@@ -15,7 +15,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::inflect::model::{InflectModel, ModelCacheHandle};
-use crate::playback::engine::{ChunkPlayback, TtsEngine, speed_to_inflect};
+use crate::playback::engine::{speed_to_inflect, ChunkPlayback, TtsEngine};
 use crate::playback::state::{PlaybackJob, PlaybackSnapshot, PlaybackSource, PlaybackState};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -308,9 +308,7 @@ fn handle_command(
 ) -> bool {
     match command {
         Command::Start(job, reply) => {
-            let result = if !state.is_idle()
-                && job.source == PlaybackSource::Clipboard
-            {
+            let result = if !state.is_idle() && job.source == PlaybackSource::Clipboard {
                 Err(AppError::Busy)
             } else {
                 let previous = state.snapshot(0).source;
@@ -411,17 +409,15 @@ fn queue_next_chunk(
     let chunk_text = match state.take_next_chunk() {
         Some(chunk) => chunk.text,
         None => return Ok(false),
-    };    let playback = engine.play_chunk(
-        &chunk_text,
-        speed_to_inflect(state.rate()),
-        0.667,
-        None,
-    )?;
+    };
+    let playback = engine.play_chunk(&chunk_text, speed_to_inflect(state.rate()), 0.667, None)?;
 
     // The engine may have failed to play even after synthesizing. Treat that as
     // a playback failure rather than leaving the chunk "playing" forever.
     if playback.duration_ms == 0 && !playback.wav_path.exists() {
-        return Err(AppError::playback("the synthesized chunk could not be played"));
+        return Err(AppError::playback(
+            "the synthesized chunk could not be played",
+        ));
     }
 
     let started = Instant::now();
@@ -457,12 +453,8 @@ fn resume(
     // chunk that was paused.
     match state.take_next_chunk() {
         Some(chunk) => {
-            let playback = engine.play_chunk(
-                &chunk.text,
-                speed_to_inflect(state.rate()),
-                0.667,
-                None,
-            )?;
+            let playback =
+                engine.play_chunk(&chunk.text, speed_to_inflect(state.rate()), 0.667, None)?;
             let started = Instant::now();
             current.replace(CurrentChunk { playback, started });
             state.set_paused(false);
@@ -512,20 +504,20 @@ fn tick(
             .as_ref()
             .map(|c| c.started.elapsed().as_millis() as u64)
             .unwrap_or(0);
-        let offset_in_chunk =
-            if current.as_ref().map(|c| c.playback.duration_ms).unwrap_or(1) > 0 {
-                (elapsed_ms
-                    * current
-                        .as_ref()
-                        .map(|c| c.playback.chars)
-                        .unwrap_or(0) as u64)
-                    / current
-                        .as_ref()
-                        .map(|c| c.playback.duration_ms)
-                        .unwrap_or(1) as u64
-            } else {
-                0
-            } as u32;
+        let offset_in_chunk = if current
+            .as_ref()
+            .map(|c| c.playback.duration_ms)
+            .unwrap_or(1)
+            > 0
+        {
+            (elapsed_ms * current.as_ref().map(|c| c.playback.chars).unwrap_or(0) as u64)
+                / current
+                    .as_ref()
+                    .map(|c| c.playback.duration_ms)
+                    .unwrap_or(1) as u64
+        } else {
+            0
+        } as u32;
         state.observe_progress(true, offset_in_chunk);
         *failed_reads = 0;
         events.snapshot(&state.snapshot(offset_in_chunk));
@@ -569,8 +561,6 @@ fn tick(
         events.snapshot(&snapshot);
     }
 }
-
-
 
 /// Test helper: a fake engine that records what it was asked to do and returns
 /// scripted chunk playback.
@@ -618,9 +608,10 @@ pub mod testing {
             variation: f32,
             _seed: Option<i64>,
         ) -> AppResult<ChunkPlayback> {
-            let mut played = self.played.lock().map_err(|e| {
-                AppError::internal(format!("fake engine lock: {e}"))
-            })?;
+            let mut played = self
+                .played
+                .lock()
+                .map_err(|e| AppError::internal(format!("fake engine lock: {e}")))?;
             played.push(PlayRecord {
                 text: text.to_string(),
                 speed,
@@ -666,9 +657,9 @@ mod tests {
 
     fn memory_cache() -> Arc<ModelCacheHandle> {
         // A real cache needs an app handle; in tests we use a minimal adapter.
-        Arc::new(ModelCacheHandle::new(
-            std::path::PathBuf::from("/tmp/inflect-test-cache"),
-        ))
+        Arc::new(ModelCacheHandle::new(std::path::PathBuf::from(
+            "/tmp/inflect-test-cache",
+        )))
     }
 
     fn is_idle(handle: &PlaybackHandle) -> bool {
@@ -714,9 +705,11 @@ mod tests {
             ))
             .expect("start");
 
-        assert!(
-            wait_until(|| !engine.played.lock().map(|p| p.is_empty()).unwrap_or(true))
-        );
+        assert!(wait_until(|| !engine
+            .played
+            .lock()
+            .map(|p| p.is_empty())
+            .unwrap_or(true)));
         let snapshot = handle.snapshot().expect("snapshot");
         assert_eq!(snapshot.status, PlaybackStatus::Playing);
         assert_eq!(snapshot.total_chars, 11);
@@ -743,7 +736,11 @@ mod tests {
         );
 
         let played = engine.played.lock().map(|p| p.clone()).unwrap_or_default();
-        assert_eq!(played.len(), 3, "every chunk should be synthesized exactly once");
+        assert_eq!(
+            played.len(),
+            3,
+            "every chunk should be synthesized exactly once"
+        );
         handle.shutdown();
     }
 
@@ -762,10 +759,15 @@ mod tests {
             ))
             .expect("start");
 
+        assert!(wait_until(|| engine
+            .played
+            .lock()
+            .map(|p| p.len() >= 1)
+            .unwrap_or(false)));
         assert!(
-            wait_until(|| engine.played.lock().map(|p| p.len() >= 1).unwrap_or(false))
+            handle.pause_resume().expect("pause"),
+            "should now be paused"
         );
-        assert!(handle.pause_resume().expect("pause"), "should now be paused");
         assert_eq!(
             handle.snapshot().expect("snapshot").status,
             PlaybackStatus::Paused
@@ -817,7 +819,9 @@ mod tests {
             ))
             .expect("start");
 
-        let err = handle.switch_model(InflectModel::Nano).expect_err("must be busy");
+        let err = handle
+            .switch_model(InflectModel::Nano)
+            .expect_err("must be busy");
         assert_eq!(err.code(), "busy");
         handle.shutdown();
     }
@@ -923,5 +927,3 @@ mod tests {
         handle.shutdown();
     }
 }
-
-

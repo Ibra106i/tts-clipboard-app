@@ -43,9 +43,11 @@ pub async fn tts_switch_model(
     let next = match model.as_str() {
         "micro" => InflectModel::Micro,
         "nano" => InflectModel::Nano,
-        other => return Err(crate::error::AppError::invalid_input(format!(
-            "unknown Inflect model: {other}"
-        ))),
+        other => {
+            return Err(crate::error::AppError::invalid_input(format!(
+                "unknown Inflect model: {other}"
+            )))
+        }
     };
     if next == *current.read().unwrap() {
         return Ok(());

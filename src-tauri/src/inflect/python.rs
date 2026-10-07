@@ -6,8 +6,8 @@
 
 use crate::error::{AppError, AppResult};
 use crate::inflect::model::InflectModel;
-use crate::inflect::wrapper::{Synthesis, WrapperErrorKind};
 use crate::inflect::wav::WavHeader;
+use crate::inflect::wrapper::{Synthesis, WrapperErrorKind};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -17,12 +17,11 @@ pub fn wrapper_script() -> AppResult<PathBuf> {
     // wrapper is shipped next to it under src-tauri/inflect/. We resolve
     // relative to the executable so the same code works for `tauri dev` and
     // for the packaged app.
-    let exe = std::env::current_exe().map_err(|e| {
-        AppError::internal(format!("cannot locate the running executable ({e})"))
-    })?;
-    let exe_dir = exe.parent().ok_or_else(|| {
-        AppError::internal("the executable has no parent directory".to_string())
-    })?;
+    let exe = std::env::current_exe()
+        .map_err(|e| AppError::internal(format!("cannot locate the running executable ({e})")))?;
+    let exe_dir = exe
+        .parent()
+        .ok_or_else(|| AppError::internal("the executable has no parent directory".to_string()))?;
     // Walk up to the crate root that contains `inflect/inflect_speak.py`.
     // The wrapper is stored under src-tauri/inflect/ in the source tree; in a
     // packaged build it should be installed next to the executable by the
@@ -32,12 +31,15 @@ pub fn wrapper_script() -> AppResult<PathBuf> {
         if (dir.join("inflect").join("inflect_speak.py")).is_file() {
             return Ok(dir.join("inflect").join("inflect_speak.py"));
         }
-        dir = dir.parent()
-            .ok_or_else(|| AppError::internal("cannot walk up to find inflect wrapper".to_string()))?
+        dir = dir
+            .parent()
+            .ok_or_else(|| {
+                AppError::internal("cannot walk up to find inflect wrapper".to_string())
+            })?
             .to_path_buf();
     }
     Err(AppError::internal(
-        "the Inflect wrapper script was not found next to the app"
+        "the Inflect wrapper script was not found next to the app",
     ))
 }
 
@@ -69,7 +71,7 @@ pub fn find_python() -> AppResult<PathBuf> {
         }
     }
     Err(AppError::internal(
-        "no `python` with torch found (Inflect requires PyTorch)"
+        "no `python` with torch found (Inflect requires PyTorch)",
     ))
 }
 
@@ -122,10 +124,7 @@ pub fn synthesize(
             .or_else(|| detail.strip_prefix("Cannot"))
             .unwrap_or(&detail)
             .trim();
-        return Err(AppError::playback(format!(
-            "Inflect synthesis failed: {detail}"
-        ))
-        .into());
+        return Err(AppError::playback(format!("Inflect synthesis failed: {detail}")).into());
     }
 
     parse_wav(wav_path)
@@ -139,11 +138,12 @@ fn parse_wav(path: &std::path::Path) -> AppResult<Synthesis> {
             "Inflect wrote a WAV file but it could not be opened ({e})"
         ))
     })?;
-    let header = WavHeader::read(&file).map_err(|e| {
-        AppError::playback(format!("Inflect WAV is unreadable ({e})"))
-    })?;
+    let header = WavHeader::read(&file)
+        .map_err(|e| AppError::playback(format!("Inflect WAV is unreadable ({e})")))?;
     let duration_ms = if header.sample_rate > 0 {
-        (header.data_bytes as f64 / (header.sample_rate as f64 * header.bytes_per_sample as f64) * 1000.0).round() as u64
+        (header.data_bytes as f64 / (header.sample_rate as f64 * header.bytes_per_sample as f64)
+            * 1000.0)
+            .round() as u64
     } else {
         0
     };
@@ -163,16 +163,25 @@ mod tests {
     #[test]
     fn find_python_returns_a_real_interpreter_when_one_exists() {
         let python = find_python();
-        assert!(python.is_ok(), "expected a python on PATH in this environment");
+        assert!(
+            python.is_ok(),
+            "expected a python on PATH in this environment"
+        );
     }
 
     #[test]
     fn wrapper_script_path_ends_with_the_wrapper_name() {
         let script = wrapper_script();
-        assert!(script.is_ok(), "tests need the wrapper shipped next to the binary");
+        assert!(
+            script.is_ok(),
+            "tests need the wrapper shipped next to the binary"
+        );
         let script = script.unwrap();
         assert!(
-            script.file_name().map(|n| n == "inflect_speak.py").unwrap_or(false),
+            script
+                .file_name()
+                .map(|n| n == "inflect_speak.py")
+                .unwrap_or(false),
             "unexpected wrapper path: {script:?}"
         );
     }

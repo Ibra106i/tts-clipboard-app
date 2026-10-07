@@ -28,9 +28,11 @@ pub struct ChunkInfo {
 impl PlaybackState {
     /// The chunk metadata for the chunk currently being spoken, if any.
     pub fn current_chunk_info(&self) -> Option<ChunkInfo> {
-        self.job.as_ref().and_then(|job| job.chunks.get(self.current_chunk).map(|chunk| ChunkInfo {
-            char_count: chunk.char_count as u32,
-        }))
+        self.job.as_ref().and_then(|job| {
+            job.chunks.get(self.current_chunk).map(|chunk| ChunkInfo {
+                char_count: chunk.char_count as u32,
+            })
+        })
     }
 
     /// Account for a chunk as fully spoken: advance `completed_chars`, move to

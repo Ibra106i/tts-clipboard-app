@@ -90,9 +90,9 @@ pub fn run() {
                 let events = std::sync::Arc::new(PlaybackEventsSink {
                     app: app.handle().clone(),
                 });
-                let cache = Arc::new(ModelCacheHandle::new(
-                    inflect::model_cache_dir(&app.handle())?
-                ));
+                let cache = Arc::new(ModelCacheHandle::new(inflect::model_cache_dir(
+                    &app.handle(),
+                )?));
                 match playback::PlaybackHandle::spawn(
                     Box::new(inflect::engine_factory(cache.clone())),
                     events,

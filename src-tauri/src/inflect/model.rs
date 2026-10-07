@@ -133,22 +133,28 @@ impl ModelCacheHandle {
     }
 
     pub fn ensure(&self, model: InflectModel) -> AppResult<PathBuf> {
-        let cache = self.inner.read().map_err(|e| {
-            AppError::internal(format!("the model cache is unavailable ({e})"))
-        })?;
+        let cache = self
+            .inner
+            .read()
+            .map_err(|e| AppError::internal(format!("the model cache is unavailable ({e})")))?;
         cache.ensure(model)
     }
 
     pub fn slot_path(&self, model: InflectModel) -> PathBuf {
-        self.inner.read().map_err(|e| {
-            AppError::internal(format!("the model cache is unavailable ({e})"))
-        }).unwrap().slot_path(model)
+        self.inner
+            .read()
+            .map_err(|e| AppError::internal(format!("the model cache is unavailable ({e})")))
+            .unwrap()
+            .slot_path(model)
     }
 
     pub fn base(&self) -> PathBuf {
-        self.inner.read().map_err(|e| {
-            AppError::internal(format!("the model cache is unavailable ({e})"))
-        }).unwrap().base.clone()
+        self.inner
+            .read()
+            .map_err(|e| AppError::internal(format!("the model cache is unavailable ({e})")))
+            .unwrap()
+            .base
+            .clone()
     }
 }
 

@@ -37,12 +37,12 @@ pub enum PlayError {
 
 #[cfg(windows)]
 mod windows {
-    use super::WavHeader;
     use super::PlayError;
+    use super::WavHeader;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
-    use windows::core::{PCWSTR, BOOL};
+    use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Media::Audio::*;
 
     /// Play a mono 16-bit PCM WAV asynchronously and return an estimate of how
@@ -54,11 +54,7 @@ mod windows {
             // SAFETY: `alias` is a valid null-terminated wide string owned by
             // this stack frame for the call. `PlaySoundW` with `SND_ASYNC`
             // does not retain the pointer after it returns.
-            let played = PlaySoundW(
-                PCWSTR(alias.as_ptr()),
-                None,
-                SND_ASYNC | SND_FILENAME,
-            );
+            let played = PlaySoundW(PCWSTR(alias.as_ptr()), None, SND_ASYNC | SND_FILENAME);
             if played == BOOL(0) {
                 return Err(last_play_sound_error());
             }
@@ -81,8 +77,7 @@ mod windows {
     }
 
     fn chunk_duration_ms(header: &WavHeader) -> u64 {
-        (header.data_bytes as f64
-            / (header.sample_rate as f64 * header.bytes_per_sample as f64)
+        (header.data_bytes as f64 / (header.sample_rate as f64 * header.bytes_per_sample as f64)
             * 1000.0)
             .round() as u64
     }
@@ -103,8 +98,8 @@ mod windows {
 
 #[cfg(not(windows))]
 mod windows {
-    use super::WavHeader;
     use super::PlayError;
+    use super::WavHeader;
     use std::path::Path;
 
     pub fn play_wav(_path: &Path, _header: &WavHeader) -> Result<u64, PlayError> {
@@ -112,8 +107,8 @@ mod windows {
     }
 }
 
-use std::path::Path;
 use crate::inflect::wav::WavHeader;
+use std::path::Path;
 
 /// Play a synthesized WAV and return the chunk duration in milliseconds.
 pub fn play_wav(path: &Path) -> Result<u64, PlayError> {
@@ -125,8 +120,8 @@ pub fn play_wav(path: &Path) -> Result<u64, PlayError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::fs::File;
+    use std::io::Write;
 
     fn make_pcm_wav(path: &Path, sample_rate: u32, num_samples: u32) -> std::io::Result<()> {
         let mut f = File::create(path)?;

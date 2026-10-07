@@ -15,10 +15,10 @@ pub mod state;
 
 pub mod inflect_engine;
 
-pub use actor::{PlaybackEvents, PlaybackHandle};
-pub use engine::{TtsEngine, ChunkPlayback};
-pub use state::{PlaybackJob, PlaybackSnapshot, PlaybackSource};
 pub use crate::inflect::model::ModelCacheHandle;
+pub use actor::{PlaybackEvents, PlaybackHandle};
+pub use engine::{ChunkPlayback, TtsEngine};
+pub use state::{PlaybackJob, PlaybackSnapshot, PlaybackSource};
 
 use crate::error::{AppError, AppResult};
 

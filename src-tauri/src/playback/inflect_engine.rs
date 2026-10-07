@@ -71,8 +71,16 @@ impl InflectEngine {
 
     /// Synthesize `text` to a WAV and play it, returning how long playback is
     /// expected to last.
-    pub fn speak_chunk(&mut self, text: &str, speed: f32, variation: f32, seed: Option<i64>) -> AppResult<Synthesis> {
-        let tmp = self.staging.join(format!("chunk_{}.wav", std::process::id()));
+    pub fn speak_chunk(
+        &mut self,
+        text: &str,
+        speed: f32,
+        variation: f32,
+        seed: Option<i64>,
+    ) -> AppResult<Synthesis> {
+        let tmp = self
+            .staging
+            .join(format!("chunk_{}.wav", std::process::id()));
         let synthesis = synthesize(
             &self.python,
             &self.wrapper,
@@ -95,7 +103,6 @@ impl InflectEngine {
             chars: text.chars().count(),
         })
     }
-
 }
 
 impl TtsEngine for InflectEngine {

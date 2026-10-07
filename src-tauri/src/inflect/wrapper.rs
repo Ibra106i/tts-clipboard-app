@@ -19,10 +19,7 @@ pub enum WrapperErrorKind {
 
 impl WrapperErrorKind {
     pub fn is_recoverable(&self) -> bool {
-        matches!(
-            self,
-            Self::WrapperFailed { .. } | Self::BadWav { .. }
-        )
+        matches!(self, Self::WrapperFailed { .. } | Self::BadWav { .. })
     }
 }
 

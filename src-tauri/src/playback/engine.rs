@@ -27,7 +27,13 @@ pub struct ChunkPlayback {
 /// A local TTS engine.
 pub trait TtsEngine: Send {
     /// Begin playback of a synthesized chunk.
-    fn play_chunk(&mut self, text: &str, speed: f32, variation: f32, seed: Option<i64>) -> AppResult<ChunkPlayback>;
+    fn play_chunk(
+        &mut self,
+        text: &str,
+        speed: f32,
+        variation: f32,
+        seed: Option<i64>,
+    ) -> AppResult<ChunkPlayback>;
 
     /// Stop any in-progress chunk playback.
     fn stop_playing(&mut self) -> AppResult<()>;
@@ -37,7 +43,9 @@ pub trait TtsEngine: Send {
 
     /// Switch the active model. Only called when playback is idle.
     fn switch_model(&mut self, model: InflectModel, cache: &ModelCacheHandle) -> AppResult<()> {
-        Err(AppError::internal("the active engine does not support switching models"))
+        Err(AppError::internal(
+            "the active engine does not support switching models",
+        ))
     }
 }
 
